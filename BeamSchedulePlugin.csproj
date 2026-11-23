@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <EtabsApiPath Condition="'$(EtabsApiPath)' == '' and Exists('$(ProgramFiles)\Computers and Structures\ETABS 22\CSiAPIv1.dll')">$(ProgramFiles)\Computers and Structures\ETABS 22\CSiAPIv1.dll</EtabsApiPath>
+    <EtabsApiPath Condition="'$(EtabsApiPath)' == ''">$(ProgramFiles)\Computers and Structures\ETABS 23\CSiAPIv1.dll</EtabsApiPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+    <Reference Include="CSiAPIv1">
+      <HintPath>$(EtabsApiPath)</HintPath>
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="ValidateEtabsApiPath" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(EtabsApiPath)')" Text="CSI API not found at '$(EtabsApiPath)'. Set EtabsApiPath to the full path of CSiAPIv1.dll." />
+  </Target>
+</Project>
