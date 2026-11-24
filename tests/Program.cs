@@ -133,7 +133,9 @@ Directory.CreateDirectory(directory);
 try
 {
     string workbook = Path.Combine(directory, "test.xlsx");
-    var report = new DemandReport(stations, 2, 5);
+    var workbookStations = stations.Select(station => (object?[])station.Clone()).ToArray();
+    workbookStations[0][18] = 0.125;
+    var report = new DemandReport(workbookStations, 2, 5);
     DemandScheduleWriter.Write(workbook, report, summary);
     using var zip = ZipFile.OpenRead(workbook);
     XDocument Read(string name) { using var stream = zip.GetEntry(name)!.Open(); return XDocument.Load(stream); }
@@ -174,13 +176,23 @@ try
     Check(new[] { FillColor(topStyle), FillColor(bottomStyle), FillColor(shearStyle) }.Distinct().Count() == 3, "Header styles must have distinct fill colours.");
     Check(sheet.Descendants(x + "row").Count() == 3, "Summary row count incorrect.");
     Check(sheet.Descendants(x + "c").Single(c => (string?)c.Attribute("r") == "C2").Value == "Level 1", "Workbook level cell incorrect.");
-    Check(sheet.Descendants(x + "c").Single(c => (string?)c.Attribute("r") == "AG2").Element(x + "f")!.Value.Contains("F2/X2"), "Workbook formula references incorrect.");
+    XElement Cell(XDocument worksheet, string address) =>
+        worksheet.Descendants(x + "c").Single(c => (string?)c.Attribute("r") == address);
+    string NumberFormat(XElement cell) =>
+        (string)xfs[(int?)cell.Attribute("s") ?? 0].Attribute("numFmtId")!;
+    var ratio = Cell(sheet, "AG2");
+    Check(ratio.Element(x + "f")!.Value.Contains("F2/X2"), "Workbook formula references incorrect.");
+    Check(NumberFormat(Cell(sheet, "F2")) == "1" && NumberFormat(ratio) == "0",
+        "Excel should display whole-number reinforcement areas without rounding the displayed area ratios.");
     Check(!sheet.Descendants(x + "c").Any(c => (string?)c.Attribute("r") == "X2"), "Manual input must initially be empty.");
     var stationSheet = Read("xl/worksheets/sheet2.xml");
     Check(stationSheet.Descendants(x + "row").Count() == 7, "Station row count incorrect.");
     string[] stationHeaders = stationSheet.Descendants(x + "row").First().Descendants(x + "t").Select(t => t.Value).ToArray();
     Check(stationHeaders.Length == 26 && !stationHeaders.Intersect(new[] { "Model path", "Design code", "Exported local time" }).Any(), "Station output must omit requested metadata.");
-    stations[0][7] = "=unsafe";
+    var stationValue = Cell(stationSheet, "P2");
+    Check(NumberFormat(stationValue) == "1" && stationValue.Element(x + "v")!.Value == "0.125",
+        "Excel should display whole-number station locations while preserving their stored precision.");
+    workbookStations[0][7] = "=unsafe";
     string csv = Path.Combine(directory, "test.csv");
     DemandScheduleWriter.Write(csv, report, null);
     Check(File.ReadAllText(csv).Contains("\"'=unsafe\""), "CSV formula injection not escaped.");

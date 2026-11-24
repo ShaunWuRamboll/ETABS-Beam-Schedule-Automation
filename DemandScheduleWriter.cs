@@ -126,8 +126,8 @@ internal static class DemandScheduleWriter
             xml.WriteStartElement("worksheet", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
             WriteSheetLayout(xml, true);
             xml.WriteStartElement("sheetData");
-            WriteExcelRow(xml, 1, BeamScheduleSummary.OutputHeaders, summaryHeader: true);
-            for (int i = 0; i < summary.Rows.Count; i++) WriteExcelRow(xml, i + 2, summary.Rows[i]);
+            WriteExcelRow(xml, 1, BeamScheduleSummary.OutputHeaders, summary: true);
+            for (int i = 0; i < summary.Rows.Count; i++) WriteExcelRow(xml, i + 2, summary.Rows[i], summary: true);
             xml.WriteEndElement();
             WriteSummaryFilters(xml, summary.Rows.Count + 1);
             xml.WriteEndElement();
@@ -211,7 +211,7 @@ internal static class DemandScheduleWriter
             xml.WriteStartElement("cellStyleXfs"); xml.WriteAttributeString("count", "1");
             Empty(xml, "xf", ("numFmtId", "0"), ("fontId", "0"), ("fillId", "0"), ("borderId", "0"));
             xml.WriteEndElement();
-            xml.WriteStartElement("cellXfs"); xml.WriteAttributeString("count", "4");
+            xml.WriteStartElement("cellXfs"); xml.WriteAttributeString("count", "5");
             Empty(xml, "xf", ("numFmtId", "0"), ("fontId", "0"), ("fillId", "0"), ("borderId", "0"), ("xfId", "0"));
             for (int fill = 2; fill <= 4; fill++)
             {
@@ -223,12 +223,14 @@ internal static class DemandScheduleWriter
                 Empty(xml, "alignment", ("wrapText", "1"), ("vertical", "center"));
                 xml.WriteEndElement();
             }
+            Empty(xml, "xf", ("numFmtId", "1"), ("fontId", "0"), ("fillId", "0"), ("borderId", "0"),
+                ("xfId", "0"), ("applyNumberFormat", "1"));
             xml.WriteEndElement();
             xml.WriteEndElement();
         });
     }
 
-    private static void WriteExcelRow(XmlWriter xml, int rowNumber, IReadOnlyList<object?> values, bool summaryHeader = false)
+    private static void WriteExcelRow(XmlWriter xml, int rowNumber, IReadOnlyList<object?> values, bool summary = false)
     {
         xml.WriteStartElement("row");
         xml.WriteAttributeString("r", rowNumber.ToString(CultureInfo.InvariantCulture));
@@ -241,9 +243,12 @@ internal static class DemandScheduleWriter
             xml.WriteAttributeString("r", ColumnName(i) + rowNumber.ToString(CultureInfo.InvariantCulture));
             if (rowNumber == 1)
             {
-                int style = summaryHeader && i >= 5 && i < 41 ? 1 + (i - 5) % 9 / 3 : 1;
+                int style = summary && i >= 5 && i < 41 ? 1 + (i - 5) % 9 / 3 : 1;
                 xml.WriteAttributeString("s", style.ToString(CultureInfo.InvariantCulture));
             }
+            else if ((value is double or SpreadsheetFormula)
+                && !(summary && BeamScheduleSummary.OutputHeaders[i].EndsWith(" area ratio", StringComparison.Ordinal)))
+                xml.WriteAttributeString("s", "4");
             if (value is SpreadsheetFormula formula)
                 xml.WriteElementString("f", formula.Expression);
             else if (value is double number)

@@ -81,7 +81,9 @@ they meet the project's design and detailing requirements.
 
 Provided longitudinal area is the sum of n × π × diameter² / 4 (mm2). Provided
 shear area is legs × π × diameter² / 4 × 1000 / spacing (mm2/m). Excel shows
-the required area divided by the provided area. If an automatic description
+the required area divided by the provided area. Numeric measurements and areas
+are displayed as whole numbers in Excel without rounding the stored values or
+calculations; area ratios retain their precision. If an automatic description
 is edited, its calculated area displays a re-export warning and its ratio is
 blank: change the settings and regenerate, rather than editing the proposal.
 In manual mode enter the reinforcement description and numeric provided area
