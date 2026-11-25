@@ -182,8 +182,11 @@ try
         (string)xfs[(int?)cell.Attribute("s") ?? 0].Attribute("numFmtId")!;
     var ratio = Cell(sheet, "AG2");
     Check(ratio.Element(x + "f")!.Value.Contains("F2/X2"), "Workbook formula references incorrect.");
-    Check(NumberFormat(Cell(sheet, "F2")) == "1" && NumberFormat(ratio) == "0",
-        "Excel should display whole-number reinforcement areas without rounding the displayed area ratios.");
+    Check(NumberFormat(Cell(sheet, "F2")) == "1"
+        && summaryHeaders.Select((header, index) => (header, index))
+            .Where(column => column.header.EndsWith(" area ratio", StringComparison.Ordinal))
+            .All(column => NumberFormat(Cell(sheet, DemandScheduleWriter.ColumnName(column.index) + "2")) == "2"),
+        "Excel should display whole-number reinforcement areas and all area ratios to two decimal places.");
     Check(!sheet.Descendants(x + "c").Any(c => (string?)c.Attribute("r") == "X2"), "Manual input must initially be empty.");
     var stationSheet = Read("xl/worksheets/sheet2.xml");
     Check(stationSheet.Descendants(x + "row").Count() == 7, "Station row count incorrect.");

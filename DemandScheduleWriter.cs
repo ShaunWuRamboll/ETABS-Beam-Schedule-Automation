@@ -211,7 +211,7 @@ internal static class DemandScheduleWriter
             xml.WriteStartElement("cellStyleXfs"); xml.WriteAttributeString("count", "1");
             Empty(xml, "xf", ("numFmtId", "0"), ("fontId", "0"), ("fillId", "0"), ("borderId", "0"));
             xml.WriteEndElement();
-            xml.WriteStartElement("cellXfs"); xml.WriteAttributeString("count", "5");
+            xml.WriteStartElement("cellXfs"); xml.WriteAttributeString("count", "6");
             Empty(xml, "xf", ("numFmtId", "0"), ("fontId", "0"), ("fillId", "0"), ("borderId", "0"), ("xfId", "0"));
             for (int fill = 2; fill <= 4; fill++)
             {
@@ -224,6 +224,8 @@ internal static class DemandScheduleWriter
                 xml.WriteEndElement();
             }
             Empty(xml, "xf", ("numFmtId", "1"), ("fontId", "0"), ("fillId", "0"), ("borderId", "0"),
+                ("xfId", "0"), ("applyNumberFormat", "1"));
+            Empty(xml, "xf", ("numFmtId", "2"), ("fontId", "0"), ("fillId", "0"), ("borderId", "0"),
                 ("xfId", "0"), ("applyNumberFormat", "1"));
             xml.WriteEndElement();
             xml.WriteEndElement();
@@ -246,9 +248,11 @@ internal static class DemandScheduleWriter
                 int style = summary && i >= 5 && i < 41 ? 1 + (i - 5) % 9 / 3 : 1;
                 xml.WriteAttributeString("s", style.ToString(CultureInfo.InvariantCulture));
             }
-            else if ((value is double or SpreadsheetFormula)
-                && !(summary && BeamScheduleSummary.OutputHeaders[i].EndsWith(" area ratio", StringComparison.Ordinal)))
-                xml.WriteAttributeString("s", "4");
+            else if (value is double or SpreadsheetFormula)
+            {
+                bool areaRatio = summary && BeamScheduleSummary.OutputHeaders[i].EndsWith(" area ratio", StringComparison.Ordinal);
+                xml.WriteAttributeString("s", areaRatio ? "5" : "4");
+            }
             if (value is SpreadsheetFormula formula)
                 xml.WriteElementString("f", formula.Expression);
             else if (value is double number)
