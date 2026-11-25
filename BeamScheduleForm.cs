@@ -17,6 +17,7 @@ internal sealed class BeamScheduleForm : Form
     private readonly ComboBox reinforcementMode;
     private readonly TextBox cover, barDiameters, maxLayers, verticalSpacing;
     private readonly TextBox linkDiameters, linkLegs, minLinkSpacing, maxLinkSpacing, linkSpacingStep;
+    private readonly TextBox revitWorkbook;
 
     public BeamScheduleForm(cSapModel model)
     {
@@ -113,6 +114,30 @@ internal sealed class BeamScheduleForm : Form
         var outputSection = CreateSection("Schedule output");
         outputPage.Controls.Add(outputSection);
         AddNote(outputSection, "Excel: one row per beam plus station data and area ratios. CSV: station data only.");
+        revitWorkbook = AddText(outputSection, "Revit beam schedule (.xlsx)", "");
+        var mappingButtons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        var browseRevit = new Button { Text = "Browse...", AutoSize = true };
+        browseRevit.Click += (_, _) =>
+        {
+            using var picker = new OpenFileDialog
+            {
+                Title = "Select Revit beam schedule",
+                Filter = "Revit beam schedule (*.xlsx)|*.xlsx",
+                CheckFileExists = true,
+                Multiselect = false
+            };
+            if (picker.ShowDialog(this) == DialogResult.OK) revitWorkbook.Text = picker.FileName;
+        };
+        var clearRevit = new Button { Text = "Clear", AutoSize = true };
+        clearRevit.Click += (_, _) => revitWorkbook.Clear();
+        mappingButtons.Controls.Add(browseRevit);
+        mappingButtons.Controls.Add(clearRevit);
+        AddWideControl(outputSection, mappingButtons);
+        AddNote(outputSection, "Optional, Excel-only geometric mapping (10 mm endpoint tolerance). "
+            + "CSV ignores this selection. Leave blank for the existing export. Requires 'RC Beam Schedule' with millimetre endpoint columns.");
+        AddNote(outputSection, "Mapping follows nine ordered geometric checks: endpoint, strict axis/split, "
+            + "offset, elevation-offset, offset split, end-extension, wide-offset, extended split and chain-to-chain. "
+            + "Review passes use the prototype's fixed tolerances, not nearest-neighbor assignment. Revit Marks and group IDs are included.");
 
         var reviewSection = CreateSection("Information to include");
         outputPage.Controls.Add(reviewSection);
@@ -179,14 +204,34 @@ internal sealed class BeamScheduleForm : Form
         {
             UseWaitCursor = true;
             bool isWorkbook = Path.GetExtension(dialog.FileName).Equals(".xlsx", StringComparison.OrdinalIgnoreCase);
+            RevitScheduleData? revit = null;
+            string revitPath = revitWorkbook.Text.Trim();
+            if (isWorkbook && revitPath.Length > 0)
+            {
+                if (!Path.GetExtension(revitPath).Equals(".xlsx", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Choose a Revit .xlsx workbook, or clear the Revit selection.");
+                if (string.Equals(Path.GetFullPath(revitPath), Path.GetFullPath(dialog.FileName), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("The export cannot overwrite the source Revit workbook. Choose a different output file.");
+                try { revit = RevitScheduleReader.Read(revitPath); }
+                catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or System.Xml.XmlException
+                    or ArgumentException or NotSupportedException)
+                {
+                    throw new InvalidOperationException("Could not read the Revit beam schedule. Correct or clear the selection.\n" + ex.Message, ex);
+                }
+            }
             ZoneFractions? fractions = isWorkbook
                 ? ZoneFractions.Create(ParseFraction(zoneI.Text), ParseFraction(zoneMiddle.Text), ParseFraction(zoneJ.Text))
                 : null;
             ReinforcementOptions? options = isWorkbook && reinforcementMode.SelectedIndex == 0 ? ReadReinforcementOptions() : null;
             var report = BeamDemandExport.Read(model, selection, groupNames, selectedStory);
             var summary = fractions == null ? null : BeamScheduleSummary.Create(model, report, fractions, options);
+            if (summary != null && revit != null) summary = BeamScheduleSummary.WithRevitMapping(summary, revit);
             DemandScheduleWriter.Write(dialog.FileName, report, summary);
             MessageBox.Show(this, $"Exported {report.BeamCount} beams and {report.StationCount} design stations."
+                + (summary?.Mapping is { } mapping ? $"\nRevit: {mapping.Alignment}; {mapping.Pairs.Count} pairs; "
+                    + $"{mapping.Links.Count} segment links across nine passes."
+                    + $"\nCovered by strict matches or candidates: {mapping.MappedEtabsCount} ETABS / {mapping.MappedRevitCount} Revit beams; "
+                    + $"{mapping.Revit.Skipped.Count} invalid Revit rows skipped. See 'Revit mapping' for review warnings." : "")
                 + "\nThe schedule is a draft and requires engineering review.",
                 Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }

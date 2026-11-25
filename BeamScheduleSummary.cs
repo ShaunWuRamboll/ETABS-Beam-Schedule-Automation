@@ -15,7 +15,11 @@ internal sealed record ZoneFractions(double I, double Middle, double J)
 }
 
 internal sealed record SpreadsheetFormula(string Expression);
-internal sealed record SummaryTable(IReadOnlyList<object?[]> Rows);
+internal sealed record SummaryTable(IReadOnlyList<object?[]> Rows, RevitMappingResult? Mapping = null)
+{
+    internal IReadOnlyList<string> ColumnHeaders => Mapping == null ? BeamScheduleSummary.OutputHeaders
+        : BeamScheduleSummary.OutputHeaders.Concat(BeamScheduleSummary.MappingHeaders).ToArray();
+}
 
 internal static class BeamScheduleSummary
 {
@@ -30,7 +34,53 @@ internal static class BeamScheduleSummary
         .Where(index => index != 4 && index != 5 && index != 6 && index != 7 && index != 8 && index != 9
             && index != 24 && index != 25).ToArray();
     internal static readonly string[] OutputHeaders = CreateOutputHeaders();
+    internal static readonly string[] MappingHeaders =
+        { "Revit mapping status", "Linked Revit references", "Mapping group ID", "Mapping review flag",
+            "Linked Revit Marks", "Mapping pass", "Max endpoint error (mm)" };
     private const int DemandStart = 29;
+
+    internal static SummaryTable WithRevitMapping(SummaryTable summary, RevitScheduleData revit)
+    {
+        if (summary.Mapping != null) throw new InvalidOperationException("Revit mapping has already been applied.");
+        int[] coordinates = new[] { "I X (mm)", "I Y (mm)", "I Z (mm)", "J X (mm)", "J Y (mm)", "J Z (mm)" }
+            .Select(header => Array.IndexOf(OutputHeaders, header)).ToArray();
+        var beams = new List<MappingBeam>();
+        var skipped = new List<SkippedMappingBeam>();
+        foreach (var row in summary.Rows)
+        {
+            string reference = (string)row[1]!;
+            var xyz = coordinates.Select(i => row[i]).ToArray();
+            if (xyz.All(v => v is double d && double.IsFinite(d)))
+            {
+                var beam = new MappingBeam(reference, new((double)xyz[0]!, (double)xyz[1]!, (double)xyz[2]!),
+                    new((double)xyz[3]!, (double)xyz[4]!, (double)xyz[5]!));
+                if (beam.IsValid) { beams.Add(beam); continue; }
+            }
+            skipped.Add(new(reference, null, "Missing, invalid or coincident ETABS endpoints"));
+        }
+        var mapping = RevitBeamMatcher.Match(beams, revit, skipped);
+        var bySource = mapping.Links.GroupBy(p => p.Etabs.Reference, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.OrdinalIgnoreCase);
+        var invalid = skipped.Select(b => b.Reference).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var rows = summary.Rows.Select(row =>
+        {
+            string reference = (string)row[1]!;
+            var linked = bySource.GetValueOrDefault(reference) ?? Array.Empty<MappingLink>();
+            bool ambiguous = mapping.Ambiguities.Any(p => string.Equals(p.Etabs?.Reference, reference, StringComparison.OrdinalIgnoreCase));
+            string status = linked.Length > 0 ? string.Join("; ", linked.Select(p => p.Status).Distinct())
+                : invalid.Contains(reference) ? "Invalid ETABS geometry - skipped"
+                : mapping.Translation == null ? mapping.Alignment : ambiguous ? "Unmatched - ambiguous candidates" : "Unmatched";
+            bool review = mapping.HasCompetingTranslations || ambiguous || linked.Any(p => p.Review);
+            object?[] extra = { status, linked.Length == 0 ? null : string.Join("\n", linked.Select(p => p.Revit.Reference).Distinct()),
+                linked.Length == 0 ? null : string.Join("\n", linked.Select(p => p.GroupId).Distinct()),
+                review ? "REVIEW" : linked.Length > 0 ? "Strict geometric match - engineering review still required" : null,
+                linked.Length == 0 ? null : string.Join("\n", linked.Select(p => $"{p.Revit.Reference} | Mark: {p.Revit.Mark ?? "(not provided)"}")),
+                linked.Length == 0 ? null : string.Join(", ", linked.Select(p => p.Pass).Distinct()),
+                linked.Select(p => p.Measurements.EndpointError).FirstOrDefault(v => v != null) };
+            return row.Concat(extra).ToArray();
+        }).ToArray();
+        return new(rows, mapping);
+    }
 
     internal static SummaryTable Create(cSapModel model, DemandReport report, ZoneFractions fractions,
         ReinforcementOptions? reinforcement = null)

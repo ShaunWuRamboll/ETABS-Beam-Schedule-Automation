@@ -13,6 +13,9 @@
     <Compile Include="..\BeamScheduleSummary.cs" Link="BeamScheduleSummary.cs" />
     <Compile Include="..\DemandScheduleWriter.cs" Link="DemandScheduleWriter.cs" />
     <Compile Include="..\ReinforcementSelection.cs" Link="ReinforcementSelection.cs" />
+    <Compile Include="..\RevitBeamMapping.cs" Link="RevitBeamMapping.cs" />
+    <Compile Include="..\RevitMappingPasses.cs" Link="RevitMappingPasses.cs" />
+    <Compile Include="..\RevitMappingSheet.cs" Link="RevitMappingSheet.cs" />
     <Reference Include="CSiAPIv1">
       <HintPath>$(EtabsApiPath)</HintPath>
     </Reference>

@@ -200,6 +200,7 @@ try
     DemandScheduleWriter.Write(csv, report, null);
     Check(File.ReadAllText(csv).Contains("\"'=unsafe\""), "CSV formula injection not escaped.");
     Check(!File.ReadLines(csv).First().Contains("\"Model path\""), "CSV must omit requested metadata.");
+    RevitMappingTests.Run(directory, report, summary);
 }
 finally
 {
@@ -207,6 +208,9 @@ finally
     Directory.Delete(directory);
 }
 Console.WriteLine("Beam summary and workbook tests passed.");
+
+if (args.Length == 4 && args[0] == "--mapping-workbooks")
+    WorkbookMappingVerification.Run(args[1], args[2], args[3]);
 
 if (args.Length == 2 && args[0] == "--fixture")
 {
