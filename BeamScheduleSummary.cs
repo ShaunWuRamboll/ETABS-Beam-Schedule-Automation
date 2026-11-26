@@ -39,7 +39,7 @@ internal static class BeamScheduleSummary
             "Linked Revit Marks", "Mapping pass", "Max endpoint error (mm)" };
     private const int DemandStart = 29;
 
-    internal static SummaryTable WithRevitMapping(SummaryTable summary, RevitScheduleData revit)
+    internal static SummaryTable WithRevitMapping(SummaryTable summary, RevitScheduleData revit, RevitMappingOptions? options = null)
     {
         if (summary.Mapping != null) throw new InvalidOperationException("Revit mapping has already been applied.");
         int[] coordinates = new[] { "I X (mm)", "I Y (mm)", "I Z (mm)", "J X (mm)", "J Y (mm)", "J Z (mm)" }
@@ -49,16 +49,17 @@ internal static class BeamScheduleSummary
         foreach (var row in summary.Rows)
         {
             string reference = (string)row[1]!;
+            string? label = row[0] as string;
             var xyz = coordinates.Select(i => row[i]).ToArray();
             if (xyz.All(v => v is double d && double.IsFinite(d)))
             {
                 var beam = new MappingBeam(reference, new((double)xyz[0]!, (double)xyz[1]!, (double)xyz[2]!),
-                    new((double)xyz[3]!, (double)xyz[4]!, (double)xyz[5]!));
+                    new((double)xyz[3]!, (double)xyz[4]!, (double)xyz[5]!), EtabsLabel: label);
                 if (beam.IsValid) { beams.Add(beam); continue; }
             }
-            skipped.Add(new(reference, null, "Missing, invalid or coincident ETABS endpoints"));
+            skipped.Add(new(reference, null, "Missing, invalid or coincident ETABS endpoints", EtabsLabel: label));
         }
-        var mapping = RevitBeamMatcher.Match(beams, revit, skipped);
+        var mapping = RevitBeamMatcher.Match(beams, revit, skipped, options);
         var bySource = mapping.Links.GroupBy(p => p.Etabs.Reference, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.OrdinalIgnoreCase);
         var invalid = skipped.Select(b => b.Reference).ToHashSet(StringComparer.OrdinalIgnoreCase);

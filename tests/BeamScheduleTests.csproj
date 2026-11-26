@@ -16,6 +16,7 @@
     <Compile Include="..\RevitBeamMapping.cs" Link="RevitBeamMapping.cs" />
     <Compile Include="..\RevitMappingPasses.cs" Link="RevitMappingPasses.cs" />
     <Compile Include="..\RevitMappingSheet.cs" Link="RevitMappingSheet.cs" />
+    <Compile Include="..\RevitMappingOptions.cs" Link="RevitMappingOptions.cs" />
     <Reference Include="CSiAPIv1">
       <HintPath>$(EtabsApiPath)</HintPath>
     </Reference>

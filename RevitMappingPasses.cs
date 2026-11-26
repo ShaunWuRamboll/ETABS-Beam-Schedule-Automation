@@ -22,13 +22,8 @@ internal sealed record MappingPassTotal(int Pass, string Name, int AddedRevit, i
 
 internal static class RevitMappingPasses
 {
-    internal const double StandardAngle = .25, WideAngle = .5, JoinLimit = 50, MinimumCoverage = .95;
-    internal const double StandardLateral = 400, StandardVertical = 100, ReviewVertical = 650, RunnerUpMargin = 25;
-    internal const double EndLimit = 600, ShortCoverage = .98, LongCoverage = .85, SplitOverhang = 350;
-    internal const double WideLateral = 500, WideCoverage = .98, SegmentCoverage = .9, ChainLinkOverlap = 1;
     internal static readonly string[] PassNames = { "Endpoint", "Strict axis / split", "Offset review",
-        "Elevation-offset review", "Split found (offset)", "End-extension review", "Wide-offset review",
-        "Split found (extended)", "Chain-to-chain review" };
+        "Split found (offset)", "Split found (extended)", "Chain-to-chain review" };
 
     private sealed record Line(BeamPoint Start, BeamPoint End)
     {
@@ -50,6 +45,9 @@ internal static class RevitMappingPasses
 
     internal static RevitMappingResult Apply(RevitMappingResult mapping)
     {
+        mapping.Options.Validate();
+        var (EndpointTolerance, Angle, JoinLimit, SegmentCoverage, SpanCoverage, ReviewLateral, SplitVertical,
+            ReviewVertical, RunnerUpMargin, EndLimit, SplitOverhang, ChainLinkOverlap) = mapping.Options;
         if (mapping.Translation is not { } translation) return mapping;
         var etabs = mapping.Etabs.Select(b => new Line(b.Start + translation, b.End + translation)).ToArray();
         var revit = mapping.Revit.Beams.Select(b => new Line(b.Start, b.End)).ToArray();
@@ -77,11 +75,9 @@ internal static class RevitMappingPasses
                 "Prototype endpoint assignment has multiple qualifying counterparts or orientations; deterministic proposal requires review."));
         }
 
-        double cosLimit = Math.Cos(StandardAngle * Math.PI / 180), cosWide = Math.Cos(WideAngle * Math.PI / 180);
+        double cosLimit = Math.Cos(Angle * Math.PI / 180);
         var strict = new List<Candidate>();
         var offsets = new List<Candidate>();
-        var extensions = new List<Candidate>();
-        var wide = new List<Candidate>();
         var splits = new List<Candidate>();
         for (int i = 0; i < etabs.Length; i++)
         {
@@ -91,8 +87,7 @@ internal static class RevitMappingPasses
                 if (usedTargets.Contains(j)) continue;
                 var a = etabs[i]; var b = revit[j];
                 double cos = Math.Abs(a.Unit.Dot(b.Unit));
-                if (cos < cosWide) continue;
-                bool standardDirection = cos >= cosLimit;
+                if (cos < cosLimit) continue;
                 var u = a.Start - b.Start; var v = a.End - b.Start; var axis = b.Unit;
                 double x = u.Dot(axis), y = v.Dot(axis), lo = Math.Min(x, y), hi = Math.Max(x, y);
                 double start = Math.Max(0, lo), end = Math.Min(b.Length, hi), overlap = end - start;
@@ -106,20 +101,14 @@ internal static class RevitMappingPasses
                     Math.Sqrt(axisError2), Math.Sqrt(lateral2), vertical, overlap, coverage,
                     overlap / Math.Min(a.Length, b.Length), StartDifference: Math.Abs(lo), EndDifference: Math.Abs(hi - b.Length));
                 var c = new Candidate(i, j, start, end, lo, hi, x <= y ? a.Start : a.End, x <= y ? a.End : a.Start, metrics);
-                if (standardDirection && axisError2 <= RevitBeamMatcher.Tolerance * RevitBeamMatcher.Tolerance
+                if (axisError2 <= EndpointTolerance * EndpointTolerance
                     && lo >= -JoinLimit && hi <= b.Length + JoinLimit && overlap >= SegmentCoverage * a.Length)
                     strict.Add(c);
-                if (standardDirection && lateral2 <= StandardLateral * StandardLateral && vertical <= StandardVertical
+                if (lateral2 <= ReviewLateral * ReviewLateral && vertical <= SplitVertical
                     && lo >= -SplitOverhang && hi <= b.Length + SplitOverhang && overlap >= SegmentCoverage * a.Length)
                     splits.Add(c);
-                bool standardOffset = standardDirection && lateral2 <= StandardLateral * StandardLateral;
-                bool wideEligible = coverage >= WideCoverage && lateral2 <= WideLateral * WideLateral;
-                if (vertical > ReviewVertical || !wideEligible && (!standardOffset || coverage < LongCoverage)) continue;
-                bool extensionEligible = standardOffset && coverage >= LongCoverage && metrics.ShorterCoverage >= ShortCoverage
-                    && metrics.StartDifference <= EndLimit && metrics.EndDifference <= EndLimit;
-                if (standardOffset && coverage >= MinimumCoverage) offsets.Add(c);
-                if (extensionEligible) extensions.Add(c);
-                if (wideEligible) wide.Add(c);
+                if (lateral2 <= ReviewLateral * ReviewLateral && vertical <= ReviewVertical && coverage >= SpanCoverage)
+                    offsets.Add(c);
             }
         }
 
@@ -140,14 +129,14 @@ internal static class RevitMappingPasses
             }
             double coverage = covered / revit[group.Key].Length;
             double maximumGap = Math.Max(gap, revit[group.Key].Length - end);
-            if (maximumGap > JoinLimit || overlap > JoinLimit || coverage < MinimumCoverage) continue;
+            if (maximumGap > JoinLimit || overlap > JoinLimit || coverage < SpanCoverage) continue;
             string id = Group();
             foreach (var p in parts) Add(p.Source, p.Target, 2, id,
                 p.Metrics with { GroupCoverage = coverage, MaximumGap = maximumGap, MaximumOverlap = overlap });
         }
 
         bool Clear(Candidate[] nearest) => nearest.Length == 1 || nearest[1].Distance - nearest[0].Distance >= RunnerUpMargin;
-        void Reviews(IEnumerable<Candidate> candidates, Func<Candidate, bool> canAdd, int pass)
+        void Reviews(IEnumerable<Candidate> candidates, int pass)
         {
             var available = candidates.Where(p => !usedSources.Contains(p.Source) && !usedTargets.Contains(p.Target)).ToArray();
             var bySource = available.GroupBy(p => p.Source).OrderBy(g => g.Key)
@@ -158,18 +147,16 @@ internal static class RevitMappingPasses
             {
                 var p = nearest[0];
                 var reverse = byTarget[p.Target];
-                if (!canAdd(p)) continue;
                 if (reverse[0].Source != p.Source || !Clear(nearest) || !Clear(reverse))
                 {
                     foreach (var c in available.Where(c => c.Source == p.Source || c.Target == p.Target))
-                        Ambiguous(c, pass, "Not mutual-nearest or runner-up margin is below 25 mm in at least one direction.");
+                        Ambiguous(c, pass, FormattableString.Invariant($"Not mutual-nearest or runner-up margin is below {RunnerUpMargin:R} mm in at least one direction."));
                     continue;
                 }
                 Add(p.Source, p.Target, pass, Group(), p.Metrics);
             }
         }
-        Reviews(offsets.Where(p => p.Metrics.Vertical <= StandardVertical), _ => true, 3);
-        Reviews(offsets, p => p.Metrics.Vertical > StandardVertical, 4);
+        Reviews(offsets, 3);
 
         void Split(bool extended)
         {
@@ -195,11 +182,11 @@ internal static class RevitMappingPasses
                     }
                     return (Parts: parts, Coverage: covered / length, Start: Math.Max(0, -parts[0].Lo),
                         End: Math.Max(0, parts[^1].Hi - length), Join: maxJoin, Gap: maxGap);
-                }).Where(g => g.Coverage >= MinimumCoverage).ToArray();
+                }).Where(g => g.Coverage >= SpanCoverage).ToArray();
             var shared = groups.SelectMany(g => g.Parts).GroupBy(p => p.Source).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet();
             foreach (var g in groups)
             {
-                int pass = extended ? 8 : 5;
+                int pass = extended ? 5 : 4;
                 if (g.Parts.Any(p => shared.Contains(p.Source)))
                 {
                     foreach (var p in g.Parts) Ambiguous(p, pass, "Split groups compete for the same ETABS segment.");
@@ -212,19 +199,15 @@ internal static class RevitMappingPasses
             }
         }
         Split(false);
-        Reviews(offsets.Concat(extensions.Where(p => p.Metrics.LongerCoverage < MinimumCoverage)),
-            p => p.Metrics.LongerCoverage < MinimumCoverage, 6);
-        Reviews(wide, p => p.Metrics.Lateral > StandardLateral
-            || Math.Abs(etabs[p.Source].Unit.Dot(revit[p.Target].Unit)) < cosLimit, 7);
         Split(true);
 
-        var sourceChains = BuildChains(etabs, usedSources, cosWide, (indices, reason) =>
+        var sourceChains = BuildChains(etabs, usedSources, cosLimit, JoinLimit, (indices, reason) =>
         {
-            foreach (int i in indices) ambiguous.Add(new(9, mapping.Etabs[i], null, reason));
+            foreach (int i in indices) ambiguous.Add(new(6, mapping.Etabs[i], null, reason));
         });
-        var targetChains = BuildChains(revit, usedTargets, cosWide, (indices, reason) =>
+        var targetChains = BuildChains(revit, usedTargets, cosLimit, JoinLimit, (indices, reason) =>
         {
-            foreach (int i in indices) ambiguous.Add(new(9, null, mapping.Revit.Beams[i], reason));
+            foreach (int i in indices) ambiguous.Add(new(6, null, mapping.Revit.Beams[i], reason));
         });
         var chainCandidates = new List<ChainCandidate>();
         for (int i = 0; i < sourceChains.Count; i++)
@@ -232,11 +215,11 @@ internal static class RevitMappingPasses
         {
             var source = sourceChains[i]; var target = targetChains[j]; var axis = target.Span;
             double cos = Math.Abs(source.Span.Unit.Dot(axis.Unit));
-            if (cos < cosWide) continue;
+            if (cos < cosLimit) continue;
             var span = Project(source.Span, axis);
             double overlap = Math.Min(span.Hi, axis.Length) - Math.Max(span.Lo, 0);
             double coverage = overlap / Math.Max(source.Span.Length, axis.Length);
-            if (coverage < WideCoverage || Math.Abs(span.Lo) > EndLimit || Math.Abs(span.Hi - axis.Length) > EndLimit) continue;
+            if (coverage < SpanCoverage || Math.Abs(span.Lo) > EndLimit || Math.Abs(span.Hi - axis.Length) > EndLimit) continue;
             double lateral = 0, vertical = 0;
             void Measure(BeamPoint point, Line reference)
             {
@@ -246,7 +229,7 @@ internal static class RevitMappingPasses
             }
             foreach (int k in source.Parts) { Measure(etabs[k].Start, axis); Measure(etabs[k].End, axis); }
             foreach (int k in target.Parts) { Measure(revit[k].Start, source.Span); Measure(revit[k].End, source.Span); }
-            if (lateral > WideLateral || vertical > ReviewVertical) continue;
+            if (lateral > ReviewLateral || vertical > ReviewVertical) continue;
             var segmentLinks = new List<(int Source, int Target, double Overlap)>();
             foreach (int s in source.Parts)
             foreach (int r in target.Parts)
@@ -268,15 +251,15 @@ internal static class RevitMappingPasses
         {
             if (!uniqueSources.Contains(c.Source) || !uniqueTargets.Contains(c.Target))
             {
-                foreach (var p in c.Links) ambiguous.Add(new(9, mapping.Etabs[p.Source], mapping.Revit.Beams[p.Target],
+                foreach (var p in c.Links) ambiguous.Add(new(6, mapping.Etabs[p.Source], mapping.Revit.Beams[p.Target],
                     "Competing chain pairing rejected.", c.Metrics));
                 continue;
             }
             string id = Group();
-            foreach (var p in c.Links) Add(p.Source, p.Target, 9, id, c.Metrics with { Overlap = p.Overlap });
+            foreach (var p in c.Links) Add(p.Source, p.Target, 6, id, c.Metrics with { Overlap = p.Overlap });
         }
         int runningSources = 0, runningTargets = 0;
-        var totals = Enumerable.Range(1, 9).Select(pass =>
+        var totals = Enumerable.Range(1, PassNames.Length).Select(pass =>
         {
             var added = links.Where(p => p.Pass == pass).ToArray();
             int sources = added.Select(p => p.Etabs).Distinct().Count(), targets = added.Select(p => p.Revit).Distinct().Count();
@@ -294,7 +277,7 @@ internal static class RevitMappingPasses
         return (Math.Min(a, b), Math.Max(a, b));
     }
 
-    private static List<Chain> BuildChains(Line[] lines, HashSet<int> used, double cosLimit, Action<int[], string> report)
+    private static List<Chain> BuildChains(Line[] lines, HashSet<int> used, double cosLimit, double JoinLimit, Action<int[], string> report)
     {
         BeamPoint End(int id) => id % 2 == 0 ? lines[id / 2].Start : lines[id / 2].End;
         var ends = Enumerable.Range(0, 2 * lines.Length).Where(id => !used.Contains(id / 2)).ToArray();

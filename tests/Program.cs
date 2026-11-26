@@ -141,7 +141,8 @@ try
     XDocument Read(string name) { using var stream = zip.GetEntry(name)!.Open(); return XDocument.Load(stream); }
     XNamespace x = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     var book = Read("xl/workbook.xml");
-    Check(book.Descendants(x + "sheet").Select(s => (string?)s.Attribute("name")).SequenceEqual(new[] { "Beam summary", "Design stations" }), "Workbook sheets incorrect.");
+    Check(book.Descendants(x + "sheet").Select(s => (string?)s.Attribute("name")).SequenceEqual(new[] { "Beam summary" })
+        && zip.GetEntry("xl/worksheets/sheet2.xml") == null, "Excel must contain only the beam summary when mapping is disabled.");
     Check((string?)book.Descendants(x + "calcPr").Single().Attribute("fullCalcOnLoad") == "1", "Workbook must recalculate on open.");
     var sheet = Read("xl/worksheets/sheet1.xml");
     string[] summaryHeaders = sheet.Descendants(x + "row").First().Descendants(x + "t").Select(t => t.Value).ToArray();
@@ -188,18 +189,13 @@ try
             .All(column => NumberFormat(Cell(sheet, DemandScheduleWriter.ColumnName(column.index) + "2")) == "2"),
         "Excel should display whole-number reinforcement areas and all area ratios to two decimal places.");
     Check(!sheet.Descendants(x + "c").Any(c => (string?)c.Attribute("r") == "X2"), "Manual input must initially be empty.");
-    var stationSheet = Read("xl/worksheets/sheet2.xml");
-    Check(stationSheet.Descendants(x + "row").Count() == 7, "Station row count incorrect.");
-    string[] stationHeaders = stationSheet.Descendants(x + "row").First().Descendants(x + "t").Select(t => t.Value).ToArray();
-    Check(stationHeaders.Length == 26 && !stationHeaders.Intersect(new[] { "Model path", "Design code", "Exported local time" }).Any(), "Station output must omit requested metadata.");
-    var stationValue = Cell(stationSheet, "P2");
-    Check(NumberFormat(stationValue) == "1" && stationValue.Element(x + "v")!.Value == "0.125",
-        "Excel should display whole-number station locations while preserving their stored precision.");
     workbookStations[0][7] = "=unsafe";
     string csv = Path.Combine(directory, "test.csv");
     DemandScheduleWriter.Write(csv, report, null);
     Check(File.ReadAllText(csv).Contains("\"'=unsafe\""), "CSV formula injection not escaped.");
     Check(!File.ReadLines(csv).First().Contains("\"Model path\""), "CSV must omit requested metadata.");
+    Check(File.ReadAllLines(csv).Length == 7 && File.ReadLines(csv).First().Contains("\"Station from I (mm)\"")
+        && File.ReadAllText(csv).Contains("\"0.125\""), "CSV must retain station rows and their full precision.");
     RevitMappingTests.Run(directory, report, summary);
 }
 finally

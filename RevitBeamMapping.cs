@@ -16,7 +16,8 @@ internal readonly record struct BeamPoint(double X, double Y, double Z)
     internal bool IsFinite => double.IsFinite(X) && double.IsFinite(Y) && double.IsFinite(Z);
 }
 
-internal sealed record MappingBeam(string Reference, BeamPoint Start, BeamPoint End, int? ExcelRow = null, string? Mark = null)
+internal sealed record MappingBeam(string Reference, BeamPoint Start, BeamPoint End, int? ExcelRow = null, string? Mark = null,
+    string? EtabsLabel = null)
 {
     internal BeamPoint Midpoint => Start / 2 + End / 2;
     internal BeamPoint Direction => End - Start;
@@ -24,7 +25,7 @@ internal sealed record MappingBeam(string Reference, BeamPoint Start, BeamPoint 
         && double.IsFinite(Direction.SquaredLength) && Direction.SquaredLength > 0;
 }
 
-internal sealed record SkippedMappingBeam(string Reference, int? ExcelRow, string Reason, string? Mark = null);
+internal sealed record SkippedMappingBeam(string Reference, int? ExcelRow, string Reason, string? Mark = null, string? EtabsLabel = null);
 internal sealed record RevitScheduleData(string Filename, IReadOnlyList<MappingBeam> Beams,
     IReadOnlyList<SkippedMappingBeam> Skipped);
 internal sealed record BeamMappingPair(MappingBeam Etabs, MappingBeam Revit, bool Reversed,
@@ -35,6 +36,7 @@ internal sealed record RevitMappingResult(RevitScheduleData Revit, IReadOnlyList
     IReadOnlyList<SkippedMappingBeam> SkippedEtabs, BeamPoint? Translation,
     IReadOnlyList<BeamMappingPair> Pairs, IReadOnlyList<TranslationScore> CompetingTranslations)
 {
+    internal RevitMappingOptions Options { get; init; } = RevitMappingOptions.Default;
     internal IReadOnlyList<MappingLink> Links { get; init; } = Array.Empty<MappingLink>();
     internal IReadOnlyList<MappingAmbiguity> Ambiguities { get; init; } = Array.Empty<MappingAmbiguity>();
     internal IReadOnlyList<MappingPassTotal> PassTotals { get; init; } = Array.Empty<MappingPassTotal>();
@@ -189,58 +191,60 @@ internal static class RevitScheduleReader
 
 internal static class RevitBeamMatcher
 {
-    internal const double Tolerance = 10;
     internal const int CandidateLimit = 24;
     private sealed record CandidatePair(int Source, int Target, double Error, bool Reversed, bool OrientationAmbiguous);
     private sealed record ScoredCandidate(BeamPoint Offset, IReadOnlyList<BeamMappingPair> Pairs, double Error);
 
     internal static RevitMappingResult Match(IReadOnlyList<MappingBeam> etabs, RevitScheduleData revit,
-        IReadOnlyList<SkippedMappingBeam>? skippedEtabs = null)
+        IReadOnlyList<SkippedMappingBeam>? skippedEtabs = null, RevitMappingOptions? options = null)
     {
+        options ??= RevitMappingOptions.Default;
+        options.Validate();
+        double tolerance = options.EndpointTolerance;
         if (etabs.Any(b => !b.IsValid) || revit.Beams.Any(b => !b.IsValid))
             throw new ArgumentException("Matcher input must contain valid, finite, non-coincident beam endpoints.");
         var votes = new Dictionary<(long X, long Y, long Z), (int Count, BeamPoint Sum)>();
         foreach (var a in etabs)
         foreach (var b in revit.Beams)
         {
-            if ((a.Direction - b.Direction).SquaredLength > 4 * Tolerance * Tolerance
-                && (a.Direction + b.Direction).SquaredLength > 4 * Tolerance * Tolerance) continue;
+            if ((a.Direction - b.Direction).SquaredLength > 4 * tolerance * tolerance
+                && (a.Direction + b.Direction).SquaredLength > 4 * tolerance * tolerance) continue;
             var offset = b.Midpoint - a.Midpoint;
-            var key = Cell(offset + new BeamPoint(Tolerance / 2, Tolerance / 2, Tolerance / 2));
+            var key = Cell(offset + new BeamPoint(tolerance / 2, tolerance / 2, tolerance / 2), tolerance);
             votes.TryGetValue(key, out var vote);
             votes[key] = (vote.Count + 1, vote.Sum + offset);
         }
         var targetCells = new Dictionary<(long X, long Y, long Z), List<int>>();
         for (int j = 0; j < revit.Beams.Count; j++)
         {
-            var key = Cell(revit.Beams[j].Midpoint);
+            var key = Cell(revit.Beams[j].Midpoint, tolerance);
             if (!targetCells.TryGetValue(key, out var indices)) targetCells[key] = indices = new();
             indices.Add(j);
         }
         // LINQ's stable ordering preserves prototype insertion order for equal votes/errors.
         var scores = votes.OrderByDescending(v => v.Value.Count).Take(CandidateLimit)
             .Select(v => v.Value.Sum / v.Value.Count).Distinct()
-            .Select(offset => Score(etabs, revit.Beams, targetCells, offset))
+            .Select(offset => Score(etabs, revit.Beams, targetCells, offset, tolerance))
             .OrderByDescending(s => s.Pairs.Count).ThenBy(s => s.Error).ToArray();
         var best = scores.FirstOrDefault();
         bool matched = best != null && best.Pairs.Count > 0;
         var competitors = matched ? scores.Skip(1).Where(s => s.Pairs.Count == best!.Pairs.Count
-                && (s.Offset - best.Offset).SquaredLength > Tolerance * Tolerance)
+                && (s.Offset - best.Offset).SquaredLength > tolerance * tolerance)
             .Select(s => new TranslationScore(s.Offset, s.Pairs.Count, s.Error)).ToArray() : Array.Empty<TranslationScore>();
         var result = new RevitMappingResult(revit, etabs, skippedEtabs ?? Array.Empty<SkippedMappingBeam>(),
-            matched ? best!.Offset : null, matched ? best!.Pairs : Array.Empty<BeamMappingPair>(), competitors);
+            matched ? best!.Offset : null, matched ? best!.Pairs : Array.Empty<BeamMappingPair>(), competitors) { Options = options };
         return RevitMappingPasses.Apply(result);
     }
 
     private static ScoredCandidate Score(IReadOnlyList<MappingBeam> sources, IReadOnlyList<MappingBeam> targets,
-        Dictionary<(long X, long Y, long Z), List<int>> cells, BeamPoint offset)
+        Dictionary<(long X, long Y, long Z), List<int>> cells, BeamPoint offset, double tolerance)
     {
         var candidates = new List<CandidatePair>();
-        double limit = Tolerance * Tolerance;
+        double limit = tolerance * tolerance;
         for (int i = 0; i < sources.Count; i++)
         {
             var source = sources[i];
-            var (x, y, z) = Cell(source.Midpoint + offset);
+            var (x, y, z) = Cell(source.Midpoint + offset, tolerance);
             var start = source.Start + offset;
             var end = source.End + offset;
             for (int dx = -1; dx <= 1; dx++)
@@ -276,12 +280,12 @@ internal static class RevitBeamMatcher
             selected.Sum(p => p.Error));
     }
 
-    private static (long X, long Y, long Z) Cell(BeamPoint point) =>
-        (Coordinate(point.X), Coordinate(point.Y), Coordinate(point.Z));
+    private static (long X, long Y, long Z) Cell(BeamPoint point, double tolerance) =>
+        (Coordinate(point.X, tolerance), Coordinate(point.Y, tolerance), Coordinate(point.Z, tolerance));
 
-    private static long Coordinate(double value)
+    private static long Coordinate(double value, double tolerance)
     {
-        double cell = Math.Floor(value / Tolerance);
+        double cell = Math.Floor(value / tolerance);
         if (!double.IsFinite(cell) || cell <= long.MinValue + 2048d || cell >= long.MaxValue - 2048d)
             throw new InvalidOperationException("Beam coordinates are outside the supported mapping range.");
         return (long)cell;

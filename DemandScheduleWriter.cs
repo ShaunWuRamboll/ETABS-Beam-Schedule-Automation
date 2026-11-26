@@ -33,7 +33,7 @@ internal static class DemandScheduleWriter
                 if (extension.Equals(".csv", StringComparison.OrdinalIgnoreCase))
                     WriteCsv(stream, report);
                 else
-                    WriteWorkbook(stream, report, summary ?? throw new InvalidOperationException("Beam summary is required for Excel export."));
+                    WriteWorkbook(stream, summary ?? throw new InvalidOperationException("Beam summary is required for Excel export."));
             }
             File.Move(temporary, fullPath, overwrite);
         }
@@ -72,11 +72,10 @@ internal static class DemandScheduleWriter
         writer.WriteLine();
     }
 
-    private static void WriteWorkbook(Stream stream, DemandReport report, SummaryTable summary)
+    private static void WriteWorkbook(Stream stream, SummaryTable summary)
     {
         var mappingRows = summary.Mapping == null ? null : RevitMappingSheet.Rows(summary.Mapping);
-        if (report.Rows.Count + 1 > 1_048_576 || summary.Rows.Count + 1 > 1_048_576
-            || mappingRows?.Count > 1_048_576)
+        if (summary.Rows.Count + 1 > 1_048_576 || mappingRows?.Count > 1_048_576)
             throw new InvalidOperationException("The schedule exceeds the Excel worksheet row limit. Export CSV instead.");
         using var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true);
         WriteXml(archive, "[Content_Types].xml", xml =>
@@ -86,9 +85,8 @@ internal static class DemandScheduleWriter
             Empty(xml, "Default", ("Extension", "xml"), ("ContentType", "application/xml"));
             Empty(xml, "Override", ("PartName", "/xl/workbook.xml"), ("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"));
             Empty(xml, "Override", ("PartName", "/xl/worksheets/sheet1.xml"), ("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"));
-            Empty(xml, "Override", ("PartName", "/xl/worksheets/sheet2.xml"), ("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"));
             if (mappingRows != null)
-                Empty(xml, "Override", ("PartName", "/xl/worksheets/sheet3.xml"), ("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"));
+                Empty(xml, "Override", ("PartName", "/xl/worksheets/sheet2.xml"), ("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"));
             Empty(xml, "Override", ("PartName", "/xl/styles.xml"), ("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"));
             xml.WriteEndElement();
         });
@@ -107,17 +105,12 @@ internal static class DemandScheduleWriter
             xml.WriteAttributeString("sheetId", "1");
             xml.WriteAttributeString("r", "id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "rId1");
             xml.WriteEndElement();
-            xml.WriteStartElement("sheet");
-            xml.WriteAttributeString("name", "Design stations");
-            xml.WriteAttributeString("sheetId", "2");
-            xml.WriteAttributeString("r", "id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "rId2");
-            xml.WriteEndElement();
             if (mappingRows != null)
             {
                 xml.WriteStartElement("sheet");
                 xml.WriteAttributeString("name", "Revit mapping");
-                xml.WriteAttributeString("sheetId", "3");
-                xml.WriteAttributeString("r", "id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "rId4");
+                xml.WriteAttributeString("sheetId", "2");
+                xml.WriteAttributeString("r", "id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "rId2");
                 xml.WriteEndElement();
             }
             xml.WriteEndElement();
@@ -128,10 +121,9 @@ internal static class DemandScheduleWriter
         {
             xml.WriteStartElement("Relationships", "http://schemas.openxmlformats.org/package/2006/relationships");
             Empty(xml, "Relationship", ("Id", "rId1"), ("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"), ("Target", "worksheets/sheet1.xml"));
-            Empty(xml, "Relationship", ("Id", "rId2"), ("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"), ("Target", "worksheets/sheet2.xml"));
             Empty(xml, "Relationship", ("Id", "rId3"), ("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"), ("Target", "styles.xml"));
             if (mappingRows != null)
-                Empty(xml, "Relationship", ("Id", "rId4"), ("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"), ("Target", "worksheets/sheet3.xml"));
+                Empty(xml, "Relationship", ("Id", "rId2"), ("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"), ("Target", "worksheets/sheet2.xml"));
             xml.WriteEndElement();
         });
         WriteStyles(archive, mapping: summary.Mapping != null);
@@ -146,18 +138,8 @@ internal static class DemandScheduleWriter
             WriteSummaryFilters(xml, summary.Rows.Count + 1, summary.ColumnHeaders);
             xml.WriteEndElement();
         });
-        WriteXml(archive, "xl\\worksheets\\sheet2.xml", xml =>
-        {
-            xml.WriteStartElement("worksheet", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
-            WriteSheetLayout(xml, false, mapping: true);
-            xml.WriteStartElement("sheetData");
-            WriteExcelRow(xml, 1, StationOutputHeaders);
-            for (int i = 0; i < report.Rows.Count; i++) WriteExcelRow(xml, i + 2, StationOutputRow(report.Rows[i]));
-            xml.WriteEndElement();
-            xml.WriteEndElement();
-        });
         if (mappingRows != null)
-            WriteXml(archive, "xl\\worksheets\\sheet3.xml", xml =>
+            WriteXml(archive, "xl\\worksheets\\sheet2.xml", xml =>
             {
                 xml.WriteStartElement("worksheet", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
                 WriteSheetLayout(xml, false);
@@ -165,6 +147,8 @@ internal static class DemandScheduleWriter
                 for (int i = 0; i < mappingRows.Count; i++)
                     WriteExcelRow(xml, i + 1, mappingRows[i], preciseNumbers: true);
                 xml.WriteEndElement();
+                WriteFilters(xml, mappingRows.Count, RevitMappingSheet.Headers,
+                    new HashSet<string>(StringComparer.Ordinal) { "Revit Mark" });
                 xml.WriteEndElement();
             });
     }
@@ -176,6 +160,11 @@ internal static class DemandScheduleWriter
             "Story", "Review status", "ETABS design errors", "ETABS design warnings",
             "Geometry warning", "Assigned section", "Design section", "Revit mapping status"
         };
+        WriteFilters(xml, lastRow, headers, filterHeaders);
+    }
+
+    private static void WriteFilters(XmlWriter xml, int lastRow, IReadOnlyList<string> headers, HashSet<string> filterHeaders)
+    {
         xml.WriteStartElement("autoFilter");
         xml.WriteAttributeString("ref", $"A1:{ColumnName(headers.Count - 1)}{lastRow}");
         for (int i = 0; i < headers.Count; i++)

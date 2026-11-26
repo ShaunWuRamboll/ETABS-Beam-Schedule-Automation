@@ -7,17 +7,17 @@ internal sealed class BeamScheduleForm : Form
 {
     private readonly ComboBox scope;
     private readonly ComboBox story;
-    private readonly DataGridView groups;
+    private readonly TextBox groups;
     private readonly ComboBox spacingMode;
     private readonly TextBox spacing;
     private readonly cSapModel model;
     private readonly TextBox zoneI;
     private readonly TextBox zoneMiddle;
     private readonly TextBox zoneJ;
-    private readonly ComboBox reinforcementMode;
     private readonly TextBox cover, barDiameters, maxLayers, verticalSpacing;
     private readonly TextBox linkDiameters, linkLegs, minLinkSpacing, maxLinkSpacing, linkSpacingStep;
     private readonly TextBox revitWorkbook;
+    private readonly Dictionary<string, TextBox> mappingSettings = new();
 
     public BeamScheduleForm(cSapModel model)
     {
@@ -46,8 +46,8 @@ internal sealed class BeamScheduleForm : Form
             Dock = DockStyle.Fill,
             MaximumSize = new Size(700, 0),
             Padding = new Padding(0, 0, 0, 10),
-            Text = "Draft schedule: torsion is excluded from proposals and ratios. Reinforcement, torsion, "
-                + "design freshness and detailing require engineering review."
+            Text = "Draft schedule: torsion is excluded from proposals and ratios. Reinforcement, torsion "
+                + "and detailing require engineering review."
         };
         layout.Controls.Add(notice, 0, 0);
 
@@ -61,22 +61,18 @@ internal sealed class BeamScheduleForm : Form
         story = AddChoice(scopeSection, "Level", "All levels");
         foreach (string name in BeamDemandExport.ReadStoryNames(model)) story.Items.Add(name);
         AddNote(scopeSection, "The level filter applies to the chosen beam selection. Levels use ETABS story assignments.");
-        AddNote(scopeSection, "Excel includes one summary row per beam and a separate station-results sheet.");
-        reinforcementMode = AddChoice(scopeSection, "Reinforcement", "Automatic draft proposals", "Manual entry");
 
         var groupSection = CreateSection("Specified groups");
         scopePage.Controls.Add(groupSection);
-        AddNote(groupSection, "Enter ETABS group names. Beams in multiple groups are exported once.");
-        groups = new DataGridView
+        AddNote(groupSection, "Select 'Specified groups' above, then enter one ETABS group name per line. Beams in multiple groups are exported once.");
+        groups = new TextBox
         {
-            Height = 140,
+            AccessibleName = "ETABS group names, one per line",
+            Multiline = true,
+            Height = 72,
             Dock = DockStyle.Fill,
-            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-            AllowUserToAddRows = true,
-            AllowUserToDeleteRows = true,
-            RowHeadersVisible = false
+            ScrollBars = ScrollBars.Vertical
         };
-        groups.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "ETABS group name" });
         AddWideControl(groupSection, groups);
         scope.SelectedIndexChanged += (_, _) => groups.Enabled = scope.SelectedIndex == 2;
         groups.Enabled = false;
@@ -91,6 +87,7 @@ internal sealed class BeamScheduleForm : Form
         var rebarPage = CreatePage("Reinforcement", tabs);
         var barsSection = CreateSection("Longitudinal bars");
         rebarPage.Controls.Add(barsSection);
+        AddNote(barsSection, "Excel exports use these settings to generate automatic draft reinforcement proposals.");
         cover = AddText(barsSection, "Cover to outside of links (mm)", "35");
         barDiameters = AddText(barsSection, "Allowed bar diameters in preference order (mm)", "16, 20, 25, 32, 40");
         maxLayers = AddText(barsSection, "Maximum number of layers", "3");
@@ -108,12 +105,11 @@ internal sealed class BeamScheduleForm : Form
         minLinkSpacing = AddText(linksSection, "Minimum link spacing (mm)", "100");
         linkSpacingStep = AddText(linksSection, "Link spacing increment (mm)", "50");
         AddNote(linksSection, "One outer link is two effective legs; each additional hook is one. Check hook anchorage and project detailing rules.");
-        reinforcementMode.SelectedIndexChanged += (_, _) => rebarPage.Enabled = reinforcementMode.SelectedIndex == 0;
 
         var outputPage = CreatePage("Output and review", tabs);
         var outputSection = CreateSection("Schedule output");
         outputPage.Controls.Add(outputSection);
-        AddNote(outputSection, "Excel: one row per beam plus station data and area ratios. CSV: station data only.");
+        AddNote(outputSection, "Excel: one row per beam with area ratios. CSV: station data only.");
         revitWorkbook = AddText(outputSection, "Revit beam schedule (.xlsx)", "");
         var mappingButtons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         var browseRevit = new Button { Text = "Browse...", AutoSize = true };
@@ -133,18 +129,43 @@ internal sealed class BeamScheduleForm : Form
         mappingButtons.Controls.Add(browseRevit);
         mappingButtons.Controls.Add(clearRevit);
         AddWideControl(outputSection, mappingButtons);
-        AddNote(outputSection, "Optional, Excel-only geometric mapping (10 mm endpoint tolerance). "
-            + "CSV ignores this selection. Leave blank for the existing export. Requires 'RC Beam Schedule' with millimetre endpoint columns.");
-        AddNote(outputSection, "Mapping follows nine ordered geometric checks: endpoint, strict axis/split, "
-            + "offset, elevation-offset, offset split, end-extension, wide-offset, extended split and chain-to-chain. "
-            + "Review passes use the prototype's fixed tolerances, not nearest-neighbor assignment. Revit Marks and group IDs are included.");
+        AddNote(outputSection, "Mapping follows six ordered geometric checks: endpoint, strict axis/split, "
+            + "offset review, review split, extended review split and chain-to-chain review. "
+            + "Review matches require engineering judgment. Revit Marks and group IDs are included.");
 
-        var reviewSection = CreateSection("Information to include");
+        var mappingPage = CreatePage("Revit mapping settings", tabs);
+        var mappingSection = CreateSection("Mapping thresholds");
+        mappingPage.Controls.Add(mappingSection);
+        AddNote(mappingSection, "Optional Excel mapping only. Shared values apply to all relevant checks; coverage values are fractions (0 to 1). "
+            + "Endpoint tolerance is used to estimate the global translation.");
+        var defaults = RevitMappingOptions.Default;
+        void MappingField(string name, string label, double value) =>
+            mappingSettings.Add(name, AddText(mappingSection, label, value.ToString("R", CultureInfo.InvariantCulture), singleLine: true));
+        MappingField(nameof(defaults.EndpointTolerance), "Endpoint / 3D axis tolerance (mm)", defaults.EndpointTolerance);
+        MappingField(nameof(defaults.Angle), "Shared strict / review angle (degrees)", defaults.Angle);
+        MappingField(nameof(defaults.JoinLimit), "Span / internal join limit (mm)", defaults.JoinLimit);
+        MappingField(nameof(defaults.SegmentCoverage), "Minimum ETABS segment containment", defaults.SegmentCoverage);
+        MappingField(nameof(defaults.SpanCoverage), "Minimum shared span / group coverage", defaults.SpanCoverage);
+        MappingField(nameof(defaults.ReviewLateral), "Shared review lateral offset (mm)", defaults.ReviewLateral);
+        MappingField(nameof(defaults.SplitVertical), "Review split vertical offset (mm)", defaults.SplitVertical);
+        MappingField(nameof(defaults.ReviewVertical), "Offset / chain vertical offset (mm)", defaults.ReviewVertical);
+        MappingField(nameof(defaults.RunnerUpMargin), "Runner-up margin (mm; both directions)", defaults.RunnerUpMargin);
+        MappingField(nameof(defaults.EndLimit), "End-extension / chain outer-end limit (mm)", defaults.EndLimit);
+        MappingField(nameof(defaults.SplitOverhang), "Extended split maximum outer overhang (mm; candidate filter)", defaults.SplitOverhang);
+        int labelWidth = mappingSettings.Values.Select(input =>
+        {
+            var label = mappingSection.GetControlFromPosition(0, mappingSection.GetRow(input))!;
+            return label.PreferredSize.Width + label.Margin.Horizontal;
+        }).Max();
+        mappingSection.ColumnStyles[0] = new ColumnStyle(SizeType.Absolute, labelWidth);
+        mappingSection.ColumnStyles[1] = new ColumnStyle(SizeType.Percent, 100);
+        mappingSection.MinimumSize = new Size(labelWidth + 140, 0);
+
+        var reviewSection = CreateSection("Included information");
         outputPage.Controls.Add(reviewSection);
-        AddNote(reviewSection, "The export includes beam identification, geometry, station demands, governing combinations, "
-            + "torsion demands and ETABS warnings and errors.");
-        AddNote(reviewSection, "Torsion is excluded from proposals and ratios and must be designed separately. Missing results are flagged. "
-            + "Area ratios do not verify detailing or code compliance.");
+        AddNote(reviewSection, "Exports include beam identification, geometry, demands and ETABS warnings and errors. "
+            + "Station-level results are available in CSV.");
+        AddNote(reviewSection, "Torsion is excluded from proposals and ratios and must be designed separately.");
 
         var buttons = new FlowLayoutPanel
         {
@@ -167,12 +188,7 @@ internal sealed class BeamScheduleForm : Form
         var groupNames = new List<string>();
         if (scope.SelectedIndex == 2)
         {
-            groups.EndEdit();
-            foreach (DataGridViewRow row in groups.Rows)
-            {
-                string name = Convert.ToString(row.Cells[0].Value)?.Trim() ?? "";
-                if (name.Length > 0) groupNames.Add(name);
-            }
+            groupNames.AddRange(groups.Lines.Select(line => line.Trim()).Where(name => name.Length > 0));
             if (groupNames.Count == 0)
             {
                 MessageBox.Show(this, "Enter at least one group name.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -193,7 +209,7 @@ internal sealed class BeamScheduleForm : Form
         {
             Title = "Export draft beam schedule",
             FileName = BeamDemandExport.SuggestedFilename(DateTime.Now, selection, selectedStory),
-            Filter = "Excel summary and stations (*.xlsx)|*.xlsx|CSV station data only (*.csv)|*.csv",
+            Filter = "Excel beam summary (*.xlsx)|*.xlsx|CSV station data only (*.csv)|*.csv",
             DefaultExt = "xlsx",
             AddExtension = true,
             OverwritePrompt = true
@@ -205,9 +221,11 @@ internal sealed class BeamScheduleForm : Form
             UseWaitCursor = true;
             bool isWorkbook = Path.GetExtension(dialog.FileName).Equals(".xlsx", StringComparison.OrdinalIgnoreCase);
             RevitScheduleData? revit = null;
+            RevitMappingOptions? mappingOptions = null;
             string revitPath = revitWorkbook.Text.Trim();
             if (isWorkbook && revitPath.Length > 0)
             {
+                mappingOptions = ReadMappingOptions();
                 if (!Path.GetExtension(revitPath).Equals(".xlsx", StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("Choose a Revit .xlsx workbook, or clear the Revit selection.");
                 if (string.Equals(Path.GetFullPath(revitPath), Path.GetFullPath(dialog.FileName), StringComparison.OrdinalIgnoreCase))
@@ -222,14 +240,14 @@ internal sealed class BeamScheduleForm : Form
             ZoneFractions? fractions = isWorkbook
                 ? ZoneFractions.Create(ParseFraction(zoneI.Text), ParseFraction(zoneMiddle.Text), ParseFraction(zoneJ.Text))
                 : null;
-            ReinforcementOptions? options = isWorkbook && reinforcementMode.SelectedIndex == 0 ? ReadReinforcementOptions() : null;
+            ReinforcementOptions? options = isWorkbook ? ReadReinforcementOptions() : null;
             var report = BeamDemandExport.Read(model, selection, groupNames, selectedStory);
             var summary = fractions == null ? null : BeamScheduleSummary.Create(model, report, fractions, options);
-            if (summary != null && revit != null) summary = BeamScheduleSummary.WithRevitMapping(summary, revit);
+            if (summary != null && revit != null) summary = BeamScheduleSummary.WithRevitMapping(summary, revit, mappingOptions);
             DemandScheduleWriter.Write(dialog.FileName, report, summary);
             MessageBox.Show(this, $"Exported {report.BeamCount} beams and {report.StationCount} design stations."
                 + (summary?.Mapping is { } mapping ? $"\nRevit: {mapping.Alignment}; {mapping.Pairs.Count} pairs; "
-                    + $"{mapping.Links.Count} segment links across nine passes."
+                    + $"{mapping.Links.Count} segment links across six passes."
                     + $"\nCovered by strict matches or candidates: {mapping.MappedEtabsCount} ETABS / {mapping.MappedRevitCount} Revit beams; "
                     + $"{mapping.Revit.Skipped.Count} invalid Revit rows skipped. See 'Revit mapping' for review warnings." : "")
                 + "\nThe schedule is a draft and requires engineering review.",
@@ -245,6 +263,32 @@ internal sealed class BeamScheduleForm : Form
         {
             UseWaitCursor = false;
         }
+    }
+
+    private RevitMappingOptions ReadMappingOptions()
+    {
+        double Value(string name)
+        {
+            string text = mappingSettings[name].Text.Trim();
+            if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value)
+                || double.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out value))
+                return value;
+            throw new InvalidOperationException($"Invalid Revit mapping setting {name}: '{text}'.");
+        }
+        var options = new RevitMappingOptions(
+            EndpointTolerance: Value(nameof(RevitMappingOptions.EndpointTolerance)),
+            Angle: Value(nameof(RevitMappingOptions.Angle)),
+            JoinLimit: Value(nameof(RevitMappingOptions.JoinLimit)),
+            SegmentCoverage: Value(nameof(RevitMappingOptions.SegmentCoverage)),
+            SpanCoverage: Value(nameof(RevitMappingOptions.SpanCoverage)),
+            ReviewLateral: Value(nameof(RevitMappingOptions.ReviewLateral)),
+            SplitVertical: Value(nameof(RevitMappingOptions.SplitVertical)),
+            ReviewVertical: Value(nameof(RevitMappingOptions.ReviewVertical)),
+            RunnerUpMargin: Value(nameof(RevitMappingOptions.RunnerUpMargin)),
+            EndLimit: Value(nameof(RevitMappingOptions.EndLimit)),
+            SplitOverhang: Value(nameof(RevitMappingOptions.SplitOverhang)));
+        options.Validate();
+        return options;
     }
 
     private ReinforcementOptions ReadReinforcementOptions()
@@ -339,10 +383,12 @@ internal sealed class BeamScheduleForm : Form
         return section;
     }
 
-    private static TextBox AddText(TableLayoutPanel section, string label, string value)
+    private static TextBox AddText(TableLayoutPanel section, string label, string value, bool singleLine = false)
     {
-        var input = new TextBox { Text = value, Dock = DockStyle.Fill };
-        AddField(section, label, input);
+        var input = new TextBox { Text = value };
+        if (singleLine) input.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        else input.Dock = DockStyle.Fill;
+        AddField(section, label, input, singleLine);
         return input;
     }
 
@@ -355,7 +401,7 @@ internal sealed class BeamScheduleForm : Form
         return input;
     }
 
-    private static void AddField(TableLayoutPanel section, string label, Control input)
+    private static void AddField(TableLayoutPanel section, string label, Control input, bool singleLine = false)
     {
         int row = section.RowCount++;
         section.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -363,7 +409,7 @@ internal sealed class BeamScheduleForm : Form
         {
             Text = label,
             AutoSize = true,
-            MaximumSize = new Size(240, 0),
+            MaximumSize = singleLine ? Size.Empty : new Size(240, 0),
             Anchor = AnchorStyles.Left,
             Margin = new Padding(0, 5, 6, 5)
         }, 0, row);

@@ -43,7 +43,8 @@ The running ETABS session continues using its previously loaded assembly.
 2. Select **Tools > Add/Show Plugins**, then **Browse**.
 3. Select `bin\Release\net8.0-windows\BeamSchedulePlugin.dll` and click **Add**.
 4. Run the plugin from the **Tools** menu. Keep the output files together.
-5. Choose all beams, selected beams, or manually entered ETABS group names.
+5. Choose all beams, selected beams, or **Specified groups** and enter ETABS
+   group names in the text box, one per line.
    Choose all levels or a single ETABS story. The level filters the chosen
    beam scope using ETABS story assignments.
    Click **Export schedule** and choose an Excel workbook or a station-data CSV.
@@ -55,9 +56,9 @@ The export requires existing concrete design results using Eurocode 2-2004.
 It does not run analysis or design or change model units. Results are converted
 from the current API units to mm, mm2, and mm2/m.
 
-The Excel workbook has a **Beam summary** sheet with one row per beam and a
-**Design stations** sheet with the original station-level demands, governing
-combinations and warnings. The summary includes filter dropdowns for story,
+The Excel workbook has a **Beam summary** sheet with one row per beam; it does
+not include a design stations sheet. Export CSV separately for the original
+station-level demands, governing combinations and warnings. The summary includes filter dropdowns for story,
 review status, ETABS errors and warnings, geometry warning, and assigned and
 design sections. The summary uses the highest reported station demand
 in each I, middle and J zone. Fractions apply to the clear length between ETABS
@@ -65,7 +66,7 @@ end offsets; stations on boundaries count in both zones. Stations in end-offset
 regions belong to the adjacent end zone. A zone without stations is flagged,
 not interpolated. All beams use the same three positive fractions, including
 cantilevers; there is no separate cantilever zoning. The CSV option exports only
-the station sheet. Model path, design code and export time are not included
+station data. Model path, design code and export time are not included
 in the output.
 
 The summary groups required areas, reinforcement descriptions, provided areas,
@@ -73,7 +74,8 @@ and ratios in the same order as the reference ETABS design sheet. Width and
 height are read from rectangular design sections. The I and J ends correspond
 to the ETABS object orientation, not necessarily physical left and right.
 
-In automatic mode the reinforcement settings are enabled. Bar diameters are
+Excel exports use the **Reinforcement** tab settings to generate automatic
+draft proposals; manual-entry mode is not offered in the form. Bar diameters are
 tried in the entered order; single-layer options are tried before multiple
 layers. The first-layer minimum bar count follows the colleague's
 width-dependent heuristic, with at least two bars. Link diameters and leg
@@ -96,8 +98,7 @@ are displayed as whole numbers in Excel without rounding the stored values or
 calculations; area ratios are displayed to two decimal places. If an automatic description
 is edited, its calculated area displays a re-export warning and its ratio is
 blank: change the settings and regenerate, rather than editing the proposal.
-In manual mode enter the reinforcement description and numeric provided area
-separately. Ratios are suppressed for missing stations, design errors, ETABS
+Ratios are suppressed for missing stations, design errors, ETABS
 warnings or invalid geometry. Ratios can appear for torsion-flagged beams, but
 exclude torsion and are not verification of the full reinforcement required.
 Torsional reinforcement must be designed and detailed separately and combined
@@ -111,7 +112,7 @@ Saving the export may replace an existing file after confirmation.
 
 In **Output and review**, browse for an optional **Revit beam schedule (.xlsx)**
 before exporting. **Clear** removes the selection. Leaving it blank preserves
-the existing Excel output; CSV always exports station data only and ignores
+the beam summary without a mapping sheet; CSV always exports station data only and ignores
 the Revit selection. The Revit workbook must have an **RC Beam Schedule**
 worksheet whose first non-empty row contains these headers (case-insensitive):
 
@@ -132,6 +133,21 @@ separately, not counted as valid unmatched Revit beams. Unreadable workbooks or
 missing/duplicate required headers stop the export with an error so the selection
 can be corrected or cleared.
 
+The **Revit mapping settings** tab exposes the adjustable thresholds. The
+defaults are those in the table below; settings apply only when exporting Excel
+with a Revit workbook selected. Chain segment links must overlap by more than
+1 mm; this threshold is fixed rather than editable in the form.
+Coverage values are fractions, not percentages. Values must be finite and
+within their displayed meaning: coverage is greater than 0 and at most 1,
+distances are non-negative (endpoint tolerance must be positive), and the shared
+angle must be at least zero and less than 90 degrees. Extended overhang must be
+at least the join limit. Invalid settings stop the export with an explanation.
+The shared angle, lateral offset and span/group coverage apply to all relevant
+checks; ETABS segment containment and review-split vertical offset are separate.
+The actual selected settings are recorded on the **Revit mapping** worksheet.
+The form starts with the current defaults each time; it does not persist or
+reload settings from an older export.
+
 Mapping uses the in-memory ETABS object endpoints already collected for the
 summary, after applying the selected beam scope and story filter. End offsets
 are not applied to mapping geometry. It estimates one global translation:
@@ -141,9 +157,11 @@ RevitXYZ = ETABSXYZ + (dX, dY, dZ)
 ```
 
 No rotation or scaling is applied. As in the Grasshopper prototype, compatible
-beam directions vote for midpoint offsets in 10 mm bins; the top 24 bins are
+beam directions vote for midpoint offsets in bins sized by the endpoint tolerance
+(10 mm by default); the top 24 bins are
 shortlisted using deterministic ties and their mean offsets are scored.
-Both 3D endpoints must be within **10 mm inclusive**, allowing reversed ends.
+Both 3D endpoints must be within the selected tolerance inclusive (10 mm by
+default), allowing reversed ends.
 For prototype parity, each translation is scored by greedily assigning endpoint
 pairs in ascending squared maximum endpoint error, using each line once.
 Candidates rank by pair count, then summed squared endpoint error. Equal votes,
@@ -154,25 +172,31 @@ alternatives are flagged for review. If no qualifying endpoint pair establishes
 a vector, the export explicitly reports **Translation not established - No match**,
 leaves the components blank and does not run later checks.
 
-### Nine ordered checks
+### Six ordered checks
 
-The matcher follows the updated Grasshopper script, not generic nearest-neighbor
-assignment. It replaces the earlier broad 100 mm / 5 degree proximity pass.
+The matcher follows the ordered Grasshopper checks, not generic nearest-neighbor
+assignment.
 Coordinates are translated once. Reversed ends are allowed throughout.
 Once a line is assigned to a group, later checks cannot reuse or reassign it.
 Split and chain groups may contain several links using the same model reference.
 
+The following are the default settings; edited values replace the relevant limits.
+
 | Pass | Check | Limits and coverage |
 |---|---|---|
 | 1 | Endpoint | Both 3D endpoints within 10 mm. |
-| 2 | Strict axis / split | At most 0.25 degrees and 10 mm 3D axis offset; at least 90% of each ETABS segment within the Revit span, 95% combined Revit coverage; 50 mm span, gap and projected overlap checks. |
-| 3 | Offset review | At most 0.25 degrees, 400 mm lateral, 100 mm vertical; at least 95% overlap of the longer span. |
-| 4 | Elevation-offset review | Same standard angle/lateral/coverage; vertical offset greater than 100 mm and at most 650 mm. |
-| 5 | Split found (offset) | Multiple connected ETABS segments to one Revit beam; standard angle/lateral and 100 mm vertical; 90% per-segment containment, 95% Revit coverage, 50 mm outer overhang and internal projected/3D joins. |
-| 6 | End-extension review | Standard angle/lateral, 650 mm vertical; at least 98% shorter-span and 85% longer-span overlap, below the standard 95% cutoff; at most 600 mm difference at either projected end. |
-| 7 | Wide-offset review | At most 0.5 degrees, 500 mm lateral, 650 mm vertical, at least 98% longer-span overlap; only used when the standard angle or lateral limit is exceeded. |
-| 8 | Split found (extended) | Pass 5 with up to 350 mm outer overhang; unchanged 50 mm internal joins and 95% Revit coverage. Only groups exceeding the earlier 50 mm outer allowance are added here. |
-| 9 | Chain-to-chain review | Unambiguous connected chains with at least two segments per side; 50 mm internal joins, 0.5 degrees, 500 mm lateral, 650 mm vertical, 98% longer-span overlap, and 600 mm projected outer-end differences. Competing chain pairings are rejected. Only segment pairs with projected overlap **greater than 1 mm** emit links. |
+| 2 | Strict axis / split | At most 0.5 degrees and 10 mm 3D axis offset; at least 90% of each ETABS segment within the Revit span, 85% combined Revit coverage; 50 mm span, gap and projected overlap checks. |
+| 3 | Offset review | At most 0.5 degrees, 850 mm lateral and 750 mm vertical; at least 85% overlap of the longer span. All eligible candidates compete together; no projected end-difference limit. |
+| 4 | Split found (offset) | Multiple connected ETABS segments to one Revit beam; at most 0.5 degrees, 850 mm lateral and 100 mm vertical; 90% per-segment containment, 85% combined Revit coverage, 50 mm outer overhang and internal projected/3D joins. |
+| 5 | Split found (extended) | Pass 4 with up to 350 mm outer overhang; unchanged 50 mm internal joins and 85% combined Revit coverage. Only groups exceeding the earlier 50 mm outer allowance are added here. |
+| 6 | Chain-to-chain review | Unambiguous connected chains with at least two segments per side; 50 mm internal joins, 0.5 degrees, 850 mm lateral, 750 mm vertical, 85% longer-span overlap, and 1,500 mm projected outer-end differences at each end. Competing chain pairings are rejected. Only segment pairs with projected overlap **greater than 1 mm** emit links. |
+
+Split group coverage is the union of projected covered intervals divided by
+Revit length; overlaps are not counted twice. The 85% longer-span check is not
+applied independently to each split segment. The reference's legacy
+end-extension criteria use 85% coverage of both shorter and longer lines and
+1,500 mm at each end, but those candidates are already included in offset
+review and the legacy pass adds no assignments.
 
 Measurements follow the prototype: project the ETABS endpoints onto the Revit
 axis, then measure residual horizontal magnitude and absolute vertical offset.
@@ -180,14 +204,13 @@ Coverage uses actual line lengths, not a component-wise coordinate test.
 The chain check measures all constituent endpoints against the opposite span.
 Staggered internal split locations do not have to align.
 
-The 1:1 review checks (3, 4, 6, 7) require mutual-nearest candidates ranked by
+The unified 1:1 offset review requires mutual-nearest candidates ranked by
 maximum 3D endpoint-to-axis residual, with a **25 mm runner-up margin in both
-directions** (exactly 25 mm is accepted). Lower-offset or standard candidates
-remain in fallback ranking where the prototype specifies, so a later check
-cannot bypass a better unresolved candidate merely by relabelling it.
+directions** (exactly 25 mm is accepted). Candidates at all eligible elevations
+compete together without a separate low-elevation priority.
 Competing strict-axis targets, split groups sharing a source segment, ambiguous
 chain neighbors and competing chain pairings are audited rather than forced.
-Passes 3-9 are visibly **review candidates**, not strict geometric matches.
+Passes 3-6 are visibly **review candidates**, not strict geometric matches.
 
 With mapping enabled, **Beam summary** appends status, linked Revit references,
 group ID, review flag, Revit Marks, pass number and available endpoint error.
@@ -195,9 +218,12 @@ Design, reinforcement and formula columns are neither moved nor changed.
 **Revit mapping** contains:
 
 - Translation, direction, all tolerance/coverage settings and warnings.
+- A **Revit Mark** filter. Filtering also hides audit and summary rows without
+  the selected Mark; clear the filter to see all rows again.
 - Per-pass distinct Revit/ETABS additions, group/link counts, running totals,
   percentage-point coverage gains and running coverage percentages.
-- One **Segment link** row per assigned ETABS-Revit segment pair, with a common
+- One **Segment link** row per assigned ETABS-Revit segment pair, with the ETABS
+  unique ID and beam label in adjacent columns and a common
   group ID for split/chain links, IDs/Marks, original coordinates, pass/review
   flags, angle, axis/lateral/vertical offsets, projected overlap, coverage and
   available end/join measurements.
@@ -229,7 +255,7 @@ Run the summary, reinforcement, synthetic Revit mapping and workbook tests with:
 dotnet run --project .\tests\BeamScheduleTests.csproj -c Release
 ```
 
-Optional offline parity verification against the full Grasshopper trial inputs:
+Optional offline verification against the full Grasshopper trial inputs:
 
 ```powershell
 dotnet run --project .\tests\BeamScheduleTests.csproj -c Release -- --mapping-workbooks "C:\path\ETABS.xlsx" "C:\path\Revit.xlsx" "C:\path\verification-output"
@@ -237,9 +263,6 @@ dotnet run --project .\tests\BeamScheduleTests.csproj -c Release -- --mapping-wo
 
 This test-only path reads the existing trial exports and writes a separate mapped
 workbook, CSV link audit and JSON report; the plugin itself always maps in-memory
-ETABS coordinates. The full-input parity assertions expect distinct Revit/ETABS
-additions of `160/160, 43/52, 666/666, 188/188, 27/76, 230/230, 6/6, 14/59,
-26/27`, totalling 1,360/1,966 Revit beams and 1,464/2,953 ETABS lines including
-review candidates. Pass 9 adds 7 groups and 46 segment links. These are test
-references only, never matcher inputs or hard-coded assignments. The project
-workbooks are not committed.
+ETABS coordinates. It checks that the saved audit contains the calculated links,
+review flags and current settings, and that both source workbooks remain unchanged.
+Project workbooks are not committed.
