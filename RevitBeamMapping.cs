@@ -17,9 +17,11 @@ internal readonly record struct BeamPoint(double X, double Y, double Z)
 }
 
 internal sealed record MappingBeam(string Reference, BeamPoint Start, BeamPoint End, int? ExcelRow = null, string? Mark = null,
-    string? EtabsLabel = null)
+    string? EtabsLabel = null, string? Level = null, string? SourceId = null)
 {
-    internal BeamPoint Midpoint => Start / 2 + End / 2;
+    internal BeamPoint Midpoint => Start + Direction * .5;
+    internal string StableId => SourceId ?? Reference;
+    internal string DisplayName => Mark ?? EtabsLabel ?? StableId;
     internal BeamPoint Direction => End - Start;
     internal bool IsValid => Start.IsFinite && End.IsFinite && Direction.IsFinite
         && double.IsFinite(Direction.SquaredLength) && Direction.SquaredLength > 0;
@@ -40,6 +42,9 @@ internal sealed record RevitMappingResult(RevitScheduleData Revit, IReadOnlyList
     internal IReadOnlyList<MappingLink> Links { get; init; } = Array.Empty<MappingLink>();
     internal IReadOnlyList<MappingAmbiguity> Ambiguities { get; init; } = Array.Empty<MappingAmbiguity>();
     internal IReadOnlyList<MappingPassTotal> PassTotals { get; init; } = Array.Empty<MappingPassTotal>();
+    internal IReadOnlyList<MappingAmbiguity> VisualCandidates { get; init; } = Array.Empty<MappingAmbiguity>();
+    internal string RunId { get; init; } = Guid.NewGuid().ToString("N");
+    internal string? EtabsFilename { get; init; }
     internal int MappedEtabsCount => Links.Select(p => p.Etabs).Distinct().Count();
     internal int MappedRevitCount => Links.Select(p => p.Revit).Distinct().Count();
     internal bool HasCompetingTranslations => CompetingTranslations.Count > 0;
@@ -52,20 +57,28 @@ internal static class RevitScheduleReader
 {
     internal static readonly string[] CoordinateHeaders =
         { "StartX_mm", "StartY_mm", "StartZ_mm", "EndX_mm", "EndY_mm", "EndZ_mm" };
+    internal static readonly string[] EtabsCoordinateHeaders =
+        { "I X (mm)", "I Y (mm)", "I Z (mm)", "J X (mm)", "J Y (mm)", "J Z (mm)" };
     private static readonly string[] ElementIdHeaders =
         { "Element ID", "ElementId", "Element_ID", "Revit Element ID", "RevitElementId", "Revit ID" };
     private static readonly XNamespace X = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     private static readonly XNamespace R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     private static readonly XNamespace P = "http://schemas.openxmlformats.org/package/2006/relationships";
 
-    internal static RevitScheduleData Read(string path)
+    internal static RevitScheduleData Read(string path) => ReadGeometry(path, false);
+
+    internal static RevitScheduleData ReadEtabs(string path) => ReadGeometry(path, true);
+
+    private static RevitScheduleData ReadGeometry(string path, bool etabs)
     {
+        string sheetName = etabs ? "Beam summary" : "RC Beam Schedule";
+        string[] coordinates = etabs ? EtabsCoordinateHeaders : CoordinateHeaders;
         using var file = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var zip = new ZipArchive(file, ZipArchiveMode.Read);
         var book = ReadPart(zip, "xl/workbook.xml");
         var sheet = book.Descendants(X + "sheet").FirstOrDefault(s =>
-            string.Equals((string?)s.Attribute("name"), "RC Beam Schedule", StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidDataException("Revit workbook is missing worksheet 'RC Beam Schedule'.");
+            string.Equals((string?)s.Attribute("name"), sheetName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidDataException($"Workbook is missing worksheet '{sheetName}'.");
         var relations = ReadPart(zip, "xl/_rels/workbook.xml.rels").Descendants(P + "Relationship").ToArray();
         string? id = (string?)sheet.Attribute(R + "id");
         var sheetRel = relations.SingleOrDefault(r => id != null && (string?)r.Attribute("Id") == id);
@@ -76,9 +89,10 @@ internal static class RevitScheduleReader
         using var stream = OpenPart(zip, PartPath(sheetRel));
         using var reader = XmlReader.Create(stream, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null });
         int[]? columns = null;
-        int elementIdColumn = 0, markColumn = 0;
+        int elementIdColumn = 0, markColumn = 0, levelColumn = 0;
         var beams = new List<MappingBeam>();
         var skipped = new List<SkippedMappingBeam>();
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int previousRow = 0;
         while (reader.Read())
         {
@@ -117,36 +131,45 @@ internal static class RevitScheduleReader
             if (columns == null)
             {
                 var headers = cells.ToDictionary(c => c.Key, c => Value(c.Value, strings)?.Trim());
-                columns = CoordinateHeaders.Select(header =>
+                columns = coordinates.Select(header =>
                 {
                     var found = headers.Where(c => string.Equals(c.Value, header, StringComparison.OrdinalIgnoreCase)).ToArray();
                     if (found.Length > 1) throw new InvalidDataException($"Revit worksheet has duplicate header '{header}'.");
                     return found.FirstOrDefault().Key;
                 }).ToArray();
-                var missing = CoordinateHeaders.Where((_, i) => columns[i] == 0).ToArray();
+                var missing = coordinates.Where((_, i) => columns[i] == 0).ToArray();
                 if (missing.Length > 0)
-                    throw new InvalidDataException("Revit 'RC Beam Schedule' is missing required millimetre columns: " + string.Join(", ", missing));
-                elementIdColumn = ElementIdHeaders.SelectMany(header => headers.Where(c =>
+                    throw new InvalidDataException($"'{sheetName}' is missing required millimetre columns: " + string.Join(", ", missing));
+                elementIdColumn = (etabs ? new[] { "Unique ID" } : ElementIdHeaders).SelectMany(header => headers.Where(c =>
                     string.Equals(c.Value, header, StringComparison.OrdinalIgnoreCase))).Select(c => c.Key).FirstOrDefault();
-                markColumn = headers.FirstOrDefault(c => string.Equals(c.Value, "Mark", StringComparison.OrdinalIgnoreCase)).Key;
+                markColumn = headers.FirstOrDefault(c => string.Equals(c.Value, etabs ? "Beam label" : "Mark", StringComparison.OrdinalIgnoreCase)).Key;
+                levelColumn = headers.FirstOrDefault(c => string.Equals(c.Value, etabs ? "Story" : "Level", StringComparison.OrdinalIgnoreCase)).Key;
                 continue;
             }
-            string? elementId = elementIdColumn != 0 && cells.TryGetValue(elementIdColumn, out var idCell)
-                ? Value(idCell, strings)?.Trim() : null;
-            string reference = string.IsNullOrEmpty(elementId) ? $"Excel row {rowNumber}" : $"Element ID {elementId}";
-            string? mark = markColumn != 0 && cells.TryGetValue(markColumn, out var markCell)
-                ? Value(markCell, strings)?.Trim() : null;
+            string? Field(int column)
+            {
+                string? value = cells.TryGetValue(column, out var cell) ? Value(cell, strings)?.Trim() : null;
+                return string.IsNullOrEmpty(value) ? null : value;
+            }
+            string? elementId = Field(elementIdColumn);
+            string reference = elementId == null ? $"Excel row {rowNumber}" : etabs ? elementId : $"Element ID {elementId}";
+            string? mark = Field(markColumn), level = Field(levelColumn);
             var xyz = new double[6];
             bool valid = true;
             for (int i = 0; i < columns.Length; i++)
                 valid &= cells.TryGetValue(columns[i], out var cell)
                     && double.TryParse(Value(cell, strings), NumberStyles.Float, CultureInfo.InvariantCulture, out xyz[i])
                     && double.IsFinite(xyz[i]);
-            var beam = new MappingBeam(reference, new(xyz[0], xyz[1], xyz[2]), new(xyz[3], xyz[4], xyz[5]), rowNumber, mark);
-            if (valid && beam.IsValid) beams.Add(beam);
-            else skipped.Add(new(reference, rowNumber, valid ? "Coincident or invalid endpoints" : "Missing, non-numeric or non-finite endpoint coordinates", mark));
+            var beam = new MappingBeam(reference, new(xyz[0], xyz[1], xyz[2]), new(xyz[3], xyz[4], xyz[5]),
+                rowNumber, etabs ? null : mark, etabs ? mark : null, level, elementId);
+            string? reason = !valid ? "Missing, non-numeric or non-finite endpoint coordinates"
+                : !beam.IsValid ? "Coincident or invalid endpoints"
+                : elementId == null ? "Missing stable beam ID"
+                : !ids.Add(elementId) ? "Duplicate stable beam ID" : null;
+            if (reason == null) beams.Add(beam);
+            else skipped.Add(new(reference, rowNumber, reason, beam.Mark, beam.EtabsLabel));
         }
-        if (columns == null) throw new InvalidDataException("Revit 'RC Beam Schedule' contains no header row.");
+        if (columns == null) throw new InvalidDataException($"'{sheetName}' contains no header row.");
         return new(Path.GetFileName(path), beams, skipped);
     }
 

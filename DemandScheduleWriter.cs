@@ -15,7 +15,8 @@ internal static class DemandScheduleWriter
     private static object?[] StationOutputRow(object?[] row) =>
         StationOutputIndices.Select(index => row[index]).ToArray();
 
-    internal static void Write(string path, DemandReport report, SummaryTable? summary, bool overwrite = true)
+    internal static void Write(string path, DemandReport report, SummaryTable? summary, bool overwrite = true,
+        MappingReview? review = null)
     {
         string extension = Path.GetExtension(path);
         if (!extension.Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
@@ -33,7 +34,7 @@ internal static class DemandScheduleWriter
                 if (extension.Equals(".csv", StringComparison.OrdinalIgnoreCase))
                     WriteCsv(stream, report);
                 else
-                    WriteWorkbook(stream, summary ?? throw new InvalidOperationException("Beam summary is required for Excel export."));
+                    WriteWorkbook(stream, summary ?? throw new InvalidOperationException("Beam summary is required for Excel export."), review);
             }
             File.Move(temporary, fullPath, overwrite);
         }
@@ -72,11 +73,17 @@ internal static class DemandScheduleWriter
         writer.WriteLine();
     }
 
-    private static void WriteWorkbook(Stream stream, SummaryTable summary)
+    private static void WriteWorkbook(Stream stream, SummaryTable summary, MappingReview? review)
     {
         var mappingRows = summary.Mapping == null ? null : RevitMappingSheet.Rows(summary.Mapping);
-        if (summary.Rows.Count + 1 > 1_048_576 || mappingRows?.Count > 1_048_576)
+        if (review != null && !ReferenceEquals(review.Mapping, summary.Mapping))
+            throw new InvalidOperationException("Review exports must share the same mapping run.");
+        var (visual, effective) = review == null ? (null, null) : MappingDecisionSheets.Rows(review);
+        if (summary.Rows.Count + 1 > 1_048_576 || mappingRows?.Count > 1_048_576
+            || visual?.Count > 1_048_576 || effective?.Count > 1_048_576)
             throw new InvalidOperationException("The schedule exceeds the Excel worksheet row limit. Export CSV instead.");
+        const string worksheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
+        const string officeRel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
         using var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true);
         WriteXml(archive, "[Content_Types].xml", xml =>
         {
@@ -87,6 +94,9 @@ internal static class DemandScheduleWriter
             Empty(xml, "Override", ("PartName", "/xl/worksheets/sheet1.xml"), ("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"));
             if (mappingRows != null)
                 Empty(xml, "Override", ("PartName", "/xl/worksheets/sheet2.xml"), ("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"));
+            if (review != null)
+                foreach (int i in new[] { 3, 4 })
+                    Empty(xml, "Override", ("PartName", $"/xl/worksheets/sheet{i}.xml"), ("ContentType", worksheetType));
             Empty(xml, "Override", ("PartName", "/xl/styles.xml"), ("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"));
             xml.WriteEndElement();
         });
@@ -113,6 +123,15 @@ internal static class DemandScheduleWriter
                 xml.WriteAttributeString("r", "id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "rId2");
                 xml.WriteEndElement();
             }
+            if (review != null)
+                foreach (var (id, name) in new[] { (3, "Visual Review"), (4, "Effective Links") })
+                {
+                    xml.WriteStartElement("sheet");
+                    xml.WriteAttributeString("name", name);
+                    xml.WriteAttributeString("sheetId", id.ToString(CultureInfo.InvariantCulture));
+                    xml.WriteAttributeString("r", "id", officeRel, $"rId{id + 1}");
+                    xml.WriteEndElement();
+                }
             xml.WriteEndElement();
             Empty(xml, "calcPr", ("calcMode", "auto"), ("fullCalcOnLoad", "1"), ("forceFullCalc", "1"));
             xml.WriteEndElement();
@@ -124,6 +143,9 @@ internal static class DemandScheduleWriter
             Empty(xml, "Relationship", ("Id", "rId3"), ("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"), ("Target", "styles.xml"));
             if (mappingRows != null)
                 Empty(xml, "Relationship", ("Id", "rId2"), ("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"), ("Target", "worksheets/sheet2.xml"));
+            if (review != null)
+                foreach (int i in new[] { 3, 4 })
+                    Empty(xml, "Relationship", ("Id", $"rId{i + 1}"), ("Type", officeRel + "/worksheet"), ("Target", $"worksheets/sheet{i}.xml"));
             xml.WriteEndElement();
         });
         WriteStyles(archive, mapping: summary.Mapping != null);
@@ -151,6 +173,46 @@ internal static class DemandScheduleWriter
                     new HashSet<string>(StringComparer.Ordinal) { "Revit Mark" });
                 xml.WriteEndElement();
             });
+        if (visual != null && effective != null)
+        {
+            WriteDecisionSheet(archive, 3, visual, MappingDecisionSheets.VisualHeaders, true);
+            WriteDecisionSheet(archive, 4, effective, MappingDecisionSheets.EffectiveHeaders, false);
+        }
+    }
+
+    private static void WriteDecisionSheet(ZipArchive archive, int sheet, List<object?[]> rows, string[] headers,
+        bool visual)
+    {
+        WriteXml(archive, $"xl\\worksheets\\sheet{sheet}.xml", xml =>
+        {
+            xml.WriteStartElement("worksheet", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
+            xml.WriteStartElement("cols");
+            for (int i = 1; i <= headers.Length; i++)
+            {
+                string column = i.ToString(CultureInfo.InvariantCulture);
+                string width = visual && i is 15 or 16 or 19 ? "38" : "19";
+                Empty(xml, "col", ("min", column), ("max", column), ("width", width), ("customWidth", "1"));
+            }
+            xml.WriteEndElement();
+            xml.WriteStartElement("sheetData");
+            for (int i = 0; i < rows.Count; i++) WriteExcelRow(xml, i + 1, rows[i], preciseNumbers: true, visualReview: visual);
+            xml.WriteEndElement();
+            Empty(xml, "autoFilter", ("ref", $"A1:{ColumnName(headers.Length - 1)}{rows.Count}"));
+            if (visual && rows.Count > 1)
+            {
+                xml.WriteStartElement("dataValidations");
+                xml.WriteAttributeString("count", "1");
+                xml.WriteStartElement("dataValidation");
+                xml.WriteAttributeString("type", "list");
+                xml.WriteAttributeString("allowBlank", "1");
+                xml.WriteAttributeString("showErrorMessage", "1");
+                xml.WriteAttributeString("sqref", $"Q2:Q{rows.Count}");
+                xml.WriteElementString("formula1", "\"Accept,Reject,Defer\"");
+                xml.WriteEndElement();
+                xml.WriteEndElement();
+            }
+            xml.WriteEndElement();
+        });
     }
 
     private static void WriteSummaryFilters(XmlWriter xml, int lastRow, IReadOnlyList<string> headers)
@@ -240,7 +302,7 @@ internal static class DemandScheduleWriter
             xml.WriteStartElement("cellStyleXfs"); xml.WriteAttributeString("count", "1");
             Empty(xml, "xf", ("numFmtId", "0"), ("fontId", "0"), ("fillId", "0"), ("borderId", "0"));
             xml.WriteEndElement();
-            xml.WriteStartElement("cellXfs"); xml.WriteAttributeString("count", mapping ? "7" : "6");
+            xml.WriteStartElement("cellXfs"); xml.WriteAttributeString("count", mapping ? "8" : "6");
             Empty(xml, "xf", ("numFmtId", "0"), ("fontId", "0"), ("fillId", "0"), ("borderId", "0"), ("xfId", "0"));
             for (int fill = 2; fill <= 4; fill++)
             {
@@ -264,6 +326,8 @@ internal static class DemandScheduleWriter
                 xml.WriteAttributeString("xfId", "0"); xml.WriteAttributeString("applyAlignment", "1");
                 Empty(xml, "alignment", ("wrapText", "1"), ("vertical", "top"));
                 xml.WriteEndElement();
+                Empty(xml, "xf", ("numFmtId", "10"), ("fontId", "0"), ("fillId", "0"), ("borderId", "0"),
+                    ("xfId", "0"), ("applyNumberFormat", "1"));
             }
             xml.WriteEndElement();
             xml.WriteEndElement();
@@ -271,7 +335,7 @@ internal static class DemandScheduleWriter
     }
 
     private static void WriteExcelRow(XmlWriter xml, int rowNumber, IReadOnlyList<object?> values, bool summary = false,
-        bool preciseNumbers = false)
+        bool preciseNumbers = false, bool visualReview = false)
     {
         xml.WriteStartElement("row");
         xml.WriteAttributeString("r", rowNumber.ToString(CultureInfo.InvariantCulture));
@@ -293,12 +357,17 @@ internal static class DemandScheduleWriter
             {
                 bool areaRatio = summary && (i >= BeamScheduleSummary.OutputHeaders.Length
                     || BeamScheduleSummary.OutputHeaders[i].EndsWith(" area ratio", StringComparison.Ordinal));
-                xml.WriteAttributeString("s", areaRatio || preciseNumbers ? "5" : "4");
+                xml.WriteAttributeString("s", visualReview && i is 7 or 8 ? "7"
+                    : visualReview && i == 2 ? "4" : areaRatio || preciseNumbers ? "5" : "4");
             }
             else if (value is string && (preciseNumbers || summary && i >= BeamScheduleSummary.OutputHeaders.Length))
                 xml.WriteAttributeString("s", "6");
             if (value is SpreadsheetFormula formula)
+            {
+                if (formula.CachedText != null) xml.WriteAttributeString("t", "str");
                 xml.WriteElementString("f", formula.Expression);
+                if (formula.CachedText != null) xml.WriteElementString("v", formula.CachedText);
+            }
             else if (value is double number)
                 xml.WriteElementString("v", number.ToString("R", CultureInfo.InvariantCulture));
             else

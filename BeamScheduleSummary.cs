@@ -14,7 +14,7 @@ internal sealed record ZoneFractions(double I, double Middle, double J)
     }
 }
 
-internal sealed record SpreadsheetFormula(string Expression);
+internal sealed record SpreadsheetFormula(string Expression, string? CachedText = null);
 internal sealed record SummaryTable(IReadOnlyList<object?[]> Rows, RevitMappingResult? Mapping = null)
 {
     internal IReadOnlyList<string> ColumnHeaders => Mapping == null ? BeamScheduleSummary.OutputHeaders
@@ -39,7 +39,8 @@ internal static class BeamScheduleSummary
             "Linked Revit Marks", "Mapping pass", "Max endpoint error (mm)" };
     private const int DemandStart = 29;
 
-    internal static SummaryTable WithRevitMapping(SummaryTable summary, RevitScheduleData revit, RevitMappingOptions? options = null)
+    internal static SummaryTable WithRevitMapping(SummaryTable summary, RevitScheduleData revit, RevitMappingOptions? options = null,
+        RevitScheduleData? fullModel = null)
     {
         if (summary.Mapping != null) throw new InvalidOperationException("Revit mapping has already been applied.");
         int[] coordinates = new[] { "I X (mm)", "I Y (mm)", "I Z (mm)", "J X (mm)", "J Y (mm)", "J Z (mm)" }
@@ -54,12 +55,14 @@ internal static class BeamScheduleSummary
             if (xyz.All(v => v is double d && double.IsFinite(d)))
             {
                 var beam = new MappingBeam(reference, new((double)xyz[0]!, (double)xyz[1]!, (double)xyz[2]!),
-                    new((double)xyz[3]!, (double)xyz[4]!, (double)xyz[5]!), EtabsLabel: label);
+                    new((double)xyz[3]!, (double)xyz[4]!, (double)xyz[5]!), EtabsLabel: string.IsNullOrWhiteSpace(label) ? null : label,
+                    Level: row[2] as string);
                 if (beam.IsValid) { beams.Add(beam); continue; }
             }
             skipped.Add(new(reference, null, "Missing, invalid or coincident ETABS endpoints", EtabsLabel: label));
         }
-        var mapping = RevitBeamMatcher.Match(beams, revit, skipped, options);
+        var mapping = RevitBeamMatcher.Match(fullModel?.Beams ?? beams, revit, fullModel?.Skipped ?? skipped, options)
+            with { EtabsFilename = fullModel?.Filename };
         var bySource = mapping.Links.GroupBy(p => p.Etabs.Reference, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.OrdinalIgnoreCase);
         var invalid = skipped.Select(b => b.Reference).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -76,7 +79,7 @@ internal static class BeamScheduleSummary
                 linked.Length == 0 ? null : string.Join("\n", linked.Select(p => p.GroupId).Distinct()),
                 review ? "REVIEW" : linked.Length > 0 ? "Strict geometric match - engineering review still required" : null,
                 linked.Length == 0 ? null : string.Join("\n", linked.Select(p => $"{p.Revit.Reference} | Mark: {p.Revit.Mark ?? "(not provided)"}")),
-                linked.Length == 0 ? null : string.Join(", ", linked.Select(p => p.Pass).Distinct()),
+                linked.Length == 0 ? null : string.Join(", ", linked.Select(p => p.PassName).Distinct()),
                 linked.Select(p => p.Measurements.EndpointError).FirstOrDefault(v => v != null) };
             return row.Concat(extra).ToArray();
         }).ToArray();

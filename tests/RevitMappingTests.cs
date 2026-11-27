@@ -25,7 +25,9 @@ internal static class RevitMappingTests
         TestPasses();
         TestOptions();
         TestInputAndWorkbook(directory, report, summary);
-        Console.WriteLine("Revit six-pass mapping, reader and workbook tests passed.");
+        TestMissingRevitWorkbook(directory);
+        TestEndExtensionAndReview(directory);
+        Console.WriteLine("Revit seven-pass mapping, reader and workbook tests passed.");
     }
 
     private static void TestOptions()
@@ -34,9 +36,9 @@ internal static class RevitMappingTests
         defaults.Validate();
         foreach (var invalid in new[] {
             defaults with { EndpointTolerance = 0 }, defaults with { Angle = double.NaN },
-            defaults with { Angle = 90 }, defaults with { ReviewLateral = -1 },
-            defaults with { ReviewVertical = double.PositiveInfinity }, defaults with { SplitOverhang = 49 },
-            defaults with { SegmentCoverage = 1.01 }, defaults with { SpanCoverage = 0 } })
+            defaults with { Angle = 90.01 }, defaults with { ReviewLateral = -1 },
+            defaults with { ReviewVertical = double.PositiveInfinity }, defaults with { SplitOverhang = -1 },
+            defaults with { SegmentCoverage = 1.01 }, defaults with { MinShortCoverage = -0.01 } })
         {
             bool rejected = false;
             try { invalid.Validate(); } catch (InvalidOperationException) { rejected = true; }
@@ -65,13 +67,13 @@ internal static class RevitMappingTests
             && WithOptions(offsetSource, defaults with { ReviewLateral = 550 }, source).Links.Single().Pass == 3,
             "The shared lateral limit must affect offset review.");
         var partialSplit = new[] { Beam("A", 0, 400, 100), Beam("B", 400, 850, 100) };
-        Check(WithOptions(partialSplit, defaults, source).Links.Count == 2
-            && WithOptions(partialSplit, defaults with { SpanCoverage = .86 }, source).Links.Count == 0,
+        Check(WithOptions(partialSplit, defaults, source).Links.Count(l => l.Pass == 4) == 2
+            && WithOptions(partialSplit, defaults with { SpanCoverage = .86 }, source).Links.All(l => l.Pass != 4),
             "The shared coverage setting must control review splits.");
         var chainSources = new[] { Beam("E1", 0, 4000), Beam("E2", 4060, 10000) };
         var chainTargets = new[] { Beam("R1", 0, 6000, 100), Beam("R2", 6000, 10000, 100) };
-        Check(WithOptions(chainSources, defaults, chainTargets).Links.All(l => l.Pass != 6)
-            && WithOptions(chainSources, defaults with { JoinLimit = 60 }, chainTargets).Links.All(l => l.Pass == 6)
+        Check(WithOptions(chainSources, defaults, chainTargets).Links.All(l => l.Pass != 7)
+            && WithOptions(chainSources, defaults with { JoinLimit = 60 }, chainTargets).Links.All(l => l.Pass == 7)
             && WithOptions(chainSources, defaults with { JoinLimit = 60 }, chainTargets).Links.Count == 3,
             "Edited join limit must affect chain inference and its links.");
         var rows = RevitMappingSheet.Rows(mapped);
@@ -141,8 +143,8 @@ internal static class RevitMappingTests
             new(1000 * Math.Cos(angle * Math.PI / 180), 1000 * Math.Sin(angle * Math.PI / 180), 0));
         Check(Pass(StrictAngle(.5), target) == 2 && Pass(StrictAngle(.50001), target) == 0,
             "The shared strict-axis angle must include 0.5 degrees and reject larger angles.");
-        Check(Pass(Beam("E", 0, 850, 100), target) == 3 && Pass(Beam("E", 0, 849.99, 100), target) == 0
-            && Pass(Beam("E", 0, 665, 100), target) == 0, "85% longer-span review boundary failed.");
+        Check(Pass(Beam("E", 0, 850, 100), target) == 3 && Pass(Beam("E", 0, 849.99, 100), target) == 5
+            && Pass(Beam("E", 0, 665, 100), target) == 5, "85% longer-span review boundary failed.");
         Check(Pass(Beam("E", -20, 980, 100), target) == 3, "Standard overlap must not be relabelled as extension.");
         Check(Pass(Beam("E", 0, 18000, 100), Beam("R", 0, 20000)) == 3,
             "Standard offset review must not enforce the 1500 mm end limit.");
@@ -162,22 +164,22 @@ internal static class RevitMappingTests
         var offsetSplit = Apply(new[] { Beam("A", 0, 400, 100), Beam("B", 400, 1000, 100) }, target);
         Check(offsetSplit.Links.Count == 2 && offsetSplit.Links.All(l => l.Pass == 4 && l.Review), "Offset split pass failed.");
         Check(Apply(new[] { Beam("A", 0, 400, 100), Beam("B", 400, 1000, 150) }, target).Links.Count == 2
-            && Apply(new[] { Beam("A", 0, 400, 100), Beam("B", 400, 1000, 150.001) }, target).Links.Count == 0,
+            && Apply(new[] { Beam("A", 0, 400, 100), Beam("B", 400, 1000, 150.001) }, target).Links.All(l => l.Pass != 4),
             "A zero projected gap must not bypass the 50 mm 3D internal join test.");
         Check(Apply(new[] { Beam("A", 0, 400, 100), Beam("B", 450, 1000, 100) }, target).Links.Count == 2
-            && Apply(new[] { Beam("A", 0, 400, 100), Beam("B", 450.001, 1000, 100) }, target).Links.Count == 0,
+            && Apply(new[] { Beam("A", 0, 400, 100), Beam("B", 450.001, 1000, 100) }, target).Links.All(l => l.Pass != 4),
             "50 mm internal join boundary failed.");
         Check(Apply(new[] { Beam("A", 0, 400, 100), Beam("B", 400, 850, 100) }, target).Links.Count == 2
-            && Apply(new[] { Beam("A", 0, 400, 100), Beam("B", 400, 849.99, 100) }, target).Links.Count == 0,
+            && Apply(new[] { Beam("A", 0, 400, 100), Beam("B", 400, 849.99, 100) }, target).Links.All(l => l.Pass != 4),
             "85% review split Revit coverage boundary failed.");
         Check(Apply(new[] { Beam("A", 0, 500, 100), Beam("B", 450, 850, 100) }, target).Links.Count == 2
-            && Apply(new[] { Beam("A", 0, 500, 100), Beam("B", 450, 849.99, 100) }, target).Links.Count == 0,
+            && Apply(new[] { Beam("A", 0, 500, 100), Beam("B", 450, 849.99, 100) }, target).Links.All(l => l.Pass != 4),
             "Split coverage must count overlapping intervals only once.");
         Check(Apply(new[] { Beam("A", 0, 400, 100, 100), Beam("B", 400, 850, 100, 100) }, target).Links.Count == 2
-            && Apply(new[] { Beam("A", 0, 400, 100, 100.001), Beam("B", 400, 850, 100, 100.001) }, target).Links.Count == 0,
+            && Apply(new[] { Beam("A", 0, 400, 100, 100.001), Beam("B", 400, 850, 100, 100.001) }, target).Links.All(l => l.Pass != 4),
             "Review splits must retain the 100 mm vertical boundary.");
         Check(Apply(new[] { Beam("A", 50, 300), Beam("B", 350, 600), Beam("C", 650, 1000) }, target).Links.Count == 3
-            && Apply(new[] { Beam("A", 50, 300), Beam("B", 350, 600), Beam("C", 650, 999.99) }, target).Links.Count == 0,
+            && Apply(new[] { Beam("A", 50, 300), Beam("B", 350, 600), Beam("C", 650, 999.99) }, target).Links.All(l => l.Pass != 2),
             "85% strict split union coverage boundary failed.");
         var nestedStrict = Apply(new[] { Beam("A", 0, 500), Beam("B", 450, 490), Beam("C", 490, 960) }, target);
         Check(nestedStrict.Links.Count == 3 && nestedStrict.Links.All(l => l.Pass == 2 && l.Measurements.GroupCoverage == .96),
@@ -204,7 +206,7 @@ internal static class RevitMappingTests
             "Review split angle must include 0.5 degrees and reject values above it.");
         var extendedTarget = Beam("R", 0, 10000);
         var extended = Apply(new[] { Beam("A", -350, 5000, 100), Beam("B", 5000, 10350, 100) }, extendedTarget);
-        Check(extended.Links.Count == 2 && extended.Links.All(l => l.Pass == 5)
+        Check(extended.Links.Count == 2 && extended.Links.All(l => l.Pass == 6)
             && Apply(new[] { Beam("A", -350.001, 5000, 100), Beam("B", 5000, 10350, 100) }, extendedTarget).Links.Count == 0,
             "350 mm extended split overhang boundary failed.");
         Check(Apply(new[] { Beam("A", -50, 5000, 100), Beam("B", 5000, 10050, 100) }, extendedTarget).Links.All(l => l.Pass == 4),
@@ -237,23 +239,23 @@ internal static class RevitMappingTests
         var chainSources = new[] { Beam("E1", 0, 4000), Beam("E2", 4000, 10000) };
         var chainTargets = new[] { Beam("R1", 0, 6000, 100), Beam("R2", 6000, 10000, 100) };
         var chains = Apply(chainSources, chainTargets);
-        Check(chains.Links.Count == 3 && chains.Links.All(l => l.Pass == 6 && l.Review)
+        Check(chains.Links.Count == 3 && chains.Links.All(l => l.Pass == 7 && l.Review)
             && chains.Links.Select(l => l.GroupId).Distinct().Count() == 1
             && chains.Links.All(l => l.Measurements.Overlap > 1)
             && chains.MappedEtabsCount == 2 && chains.MappedRevitCount == 2, "Staggered chain joins must emit only overlapping segment links in one group.");
         var competingChains = Apply(chainSources, chainTargets.Concat(new[] { Beam("R3", 0, 6000, 200), Beam("R4", 6000, 10000, 200) }).ToArray());
-        Check(competingChains.Links.Count == 0 && competingChains.Ambiguities.Any(a => a.Pass == 6 && a.Reason.Contains("pairing")),
+        Check(competingChains.Links.Count == 0 && competingChains.Ambiguities.Any(a => a.Pass == 7 && a.Reason.Contains("pairing")),
             "Competing chain pairings must be rejected.");
         var chainBoundary = Apply(new[] { Beam("E1", 0, 4000), Beam("E2", 4050, 10000) }, chainTargets);
         Check(chainBoundary.Links.Count == 3 && chainBoundary.Links.All(l => l.Measurements.MaximumJoin == 50), "Chain join limit must include 50 mm.");
         var coverageTargets = new[] { Beam("R1", 0, 5400, 100), Beam("R2", 5400, 9000, 100) };
         var chainCoverage = Apply(new[] { Beam("E1", 0, 3600), Beam("E2", 3600, 7650) }, coverageTargets);
-        Check(chainCoverage.Links.Count == 3 && chainCoverage.Links.All(l => l.Pass == 6)
+        Check(chainCoverage.Links.Count == 3 && chainCoverage.Links.All(l => l.Pass == 7)
             && Apply(new[] { Beam("E1", 0, 3600), Beam("E2", 3600, 7649.99) }, coverageTargets).Links.All(l => l.Pass != 6),
             "Chain coverage must include 85% and reject less even when end differences are within 1500 mm.");
         var chainAtVertical = Apply(new[] { Beam("E1", 0, 3600), Beam("E2", 3600, 7650) },
             Beam("R1", 0, 5400, 100, 750), Beam("R2", 5400, 9000, 100, 750));
-        Check(chainAtVertical.Links.Count == 3 && chainAtVertical.Links.All(l => l.Pass == 6)
+        Check(chainAtVertical.Links.Count == 3 && chainAtVertical.Links.All(l => l.Pass == 7)
             && Apply(new[] { Beam("E1", 0, 3600), Beam("E2", 3600, 7650) },
                 Beam("R1", 0, 5400, 100, 750.001), Beam("R2", 5400, 9000, 100, 750.001)).Links.All(l => l.Pass != 6),
             "Chain review must include 750 mm vertical offset and reject larger offsets.");
@@ -261,17 +263,17 @@ internal static class RevitMappingTests
             "Chain joins above 50 mm must not connect.");
         var longChainTargets = new[] { Beam("R1", 0, 60000, 100), Beam("R2", 60000, 100000, 100) };
         var endLimitChain = Apply(new[] { Beam("E1", 0, 40000), Beam("E2", 40000, 98500) }, longChainTargets);
-        Check(endLimitChain.Links.Count == 3 && endLimitChain.Links.All(l => l.Pass == 6)
+        Check(endLimitChain.Links.Count == 3 && endLimitChain.Links.All(l => l.Pass == 7)
             && Apply(new[] { Beam("E1", 0, 40000), Beam("E2", 40000, 98499.999) }, longChainTargets).Links.Count == 0,
             "Chain review must enforce the inclusive 1500 mm end limit.");
         var startLimitChain = Apply(new[] { Beam("E1", 1500, 40000), Beam("E2", 40000, 100000) }, longChainTargets);
-        Check(startLimitChain.Links.Count == 3 && startLimitChain.Links.All(l => l.Pass == 6)
+        Check(startLimitChain.Links.Count == 3 && startLimitChain.Links.All(l => l.Pass == 7)
             && Apply(new[] { Beam("E1", 1500.001, 40000), Beam("E2", 40000, 100000) }, longChainTargets).Links.Count == 0,
             "Chain review must enforce the inclusive 1500 mm start limit.");
         var linkBoundarySources = new[] { Beam("E1", 0, 4000), Beam("E2", 4000, 7000), Beam("E3", 7000, 10000) };
         var tinyLink = Apply(linkBoundarySources, Beam("R1", 0, 2000, 100), Beam("R2", 2000, 3999, 100),
             Beam("R3", 3999, 9000, 100), Beam("R4", 9000, 10000, 100));
-        Check(tinyLink.Links.All(l => l.Pass == 6) && tinyLink.Links.Count == 5
+        Check(tinyLink.Links.All(l => l.Pass == 7) && tinyLink.Links.Count == 5
             && !tinyLink.Links.Any(l => l.Etabs.Reference == "E1" && l.Revit.Reference == "R3"),
             "A chain segment overlap of exactly 1 mm must not emit a link.");
         var overOne = Apply(linkBoundarySources, Beam("R1", 0, 2000, 100), Beam("R2", 2000, 3998.999, 100),
@@ -282,10 +284,115 @@ internal static class RevitMappingTests
         var locked = RevitMappingPasses.Apply(new(Data(target, Beam("near", 0, 1000, 20)),
             new[] { endpointSource, Beam("other-segment", 0, 400) }, Array.Empty<SkippedMappingBeam>(), default(BeamPoint),
             new[] { new BeamMappingPair(endpointSource, endpointTarget, false, 0, false) }, Array.Empty<TranslationScore>()));
-        Check(locked.Links.Count == 1 && locked.Links[0].Pass == 1,
+        Check(locked.Links.Count(l => l.Etabs == endpointSource || l.Revit == endpointTarget) == 1 && locked.Links[0].Pass == 1,
             "Endpoint assignments must block both source and target from later split and offset passes.");
         foreach (var group in chains.Links.GroupBy(l => l.Etabs)) Check(group.Select(l => l.Pass).Distinct().Count() == 1, "Sources must not be reassigned.");
         foreach (var group in split.Links.GroupBy(l => l.Revit)) Check(group.Select(l => l.Pass).Distinct().Count() == 1, "Targets must not be reassigned.");
+    }
+
+    private static void TestMissingRevitWorkbook(string directory)
+    {
+        foreach (string revitPath in new[] { "", " \t" })
+        {
+            bool identifiedMissingRevit = false;
+            try { MappingReviewExport.MapWorkbooks(Path.Combine(directory, "unused-etabs.xlsx"), revitPath); }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("Select the Revit beam schedule workbook"))
+            {
+                identifiedMissingRevit = true;
+            }
+            Check(identifiedMissingRevit, "A blank Revit workbook path must identify the required input before opening ETABS data.");
+        }
+    }
+
+    private static void TestEndExtensionAndReview(string directory)
+    {
+        var target = Beam("R-EXT", 0, 2000) with { Mark = "Revit extension", Level = "3rd Storey" };
+        var source = Beam("E-EXT", -990, 2010, 350, 650) with { EtabsLabel = "ETABS extension", Level = "Story3" };
+        var matched = Apply(new[] { source }, target);
+        var link = matched.Links.Single();
+        Check(link.Status == "Matched" && link.PassName == "End-extension review" && matched.VisualCandidates.Count == 0
+            && Math.Abs(link.Measurements.LongerCoverage!.Value - 2d / 3) < 1e-10
+            && link.Measurements.ShorterCoverage == 1
+            && link.Measurements.StartDifference == 990
+            && link.Measurements.EndDifference == 10,
+            "The pair must be an assigned end-extension match with the projected metrics, not a visual candidate.");
+        var generated = new MappingReview(matched);
+        Check(generated.Levels.Single().Etabs.Single() == source, "A linked ETABS line must appear on the Revit level.");
+        var shortLimit = RevitMappingOptions.Default with { EndLimit = 100 };
+        RevitMappingResult WithShortLimit(MappingBeam r) => RevitMappingPasses.Apply(
+            new(new RevitScheduleData("synthetic.xlsx", new[] { r }, Array.Empty<SkippedMappingBeam>()),
+                new[] { source }, Array.Empty<SkippedMappingBeam>(),
+                default(BeamPoint), Array.Empty<BeamMappingPair>(), Array.Empty<TranslationScore>()) { Options = shortLimit });
+        var overLimit = WithShortLimit(target);
+        var overLimitPair = overLimit.VisualCandidates.Single();
+        Check(overLimit.Links.Count == 0 && overLimitPair.Reason.Contains("990.00 / 10.00 mm")
+            && overLimitPair.Reason.Contains("100 mm automatic limit"),
+            "End difference must prevent automatic assignment without removing a geometrically eligible same-level review pair.");
+        Check(WithShortLimit(target with { Level = "4th Storey" }).VisualCandidates.Count == 0,
+            "The review screen must still exclude cross-level pairs.");
+        var reviewRows = MappingDecisionSheets.Rows(new MappingReview(overLimit));
+        Check(Equals(reviewRows.Visual.Single(r => Equals(r[0], "VR-001"))[7], link.Measurements.LongerCoverage),
+            "Visual Review must contain the projected longer-span overlap.");
+        using (var z = ZipFile.OpenRead(WriteDecisionFixture(Path.Combine(directory, "over-limit.xlsx"), overLimit)))
+        using (var s = z.GetEntry("ppt/slides/slide1.xml")!.Open())
+        {
+            var labels = XDocument.Load(s).Descendants().Where(e => e.Name.LocalName == "t").Select(e => e.Value).ToArray();
+            Check(labels.Contains("Revit extension / ETABS extension") && labels.Contains("66.67%") && labels.Count(t => t == "VR-001") == 3,
+                "The slide must show the beam pair and its longer-span overlap in the footer, plus both plan markers.");
+        }
+        var boundary = Beam("R", 0, 2000);
+        Check(Pass(Beam("E", -1500, 2000, 100), boundary) == 5
+            && Pass(Beam("E", -1500.001, 2000, 100), boundary) == 0
+            && Pass(Beam("E", -1301, 1699, 100), boundary) == 0, "End difference or short coverage gate is incorrect.");
+        var other = target with { Reference = "other", Start = target.Start + new BeamPoint(0, 12, 0),
+            End = target.End + new BeamPoint(0, 12, 0), Mark = null };
+        var ambiguous = Apply(new[] { source }, target, other);
+        var review = new MappingReview(ambiguous, "3");
+        Check(ambiguous.Links.Count == 0 && review.Pairs.Count == 2 && review.Levels.Count == 1,
+            "Runner-up margin must preserve both same-level visual alternatives.");
+        var keepStandard = Apply(new[] { Beam("E", 0, 1800, 0, 500) },
+            Beam("offset1", 0, 1800, 100), Beam("offset2", 0, 1800, 105), Beam("extension", -500, 1800, 108));
+        Check(keepStandard.Links.Count == 0, "An extension must not bypass unresolved standard offsets in the combined ranking.");
+        string file = Path.Combine(directory, "visual-review.xlsx");
+        string deck = WriteDecisionFixture(file, ambiguous);
+        using var zip = ZipFile.OpenRead(deck);
+        using var slide = zip.GetEntry("ppt/slides/slide1.xml")!.Open();
+        var xml = XDocument.Load(slide);
+        XNamespace p = "http://schemas.openxmlformats.org/presentationml/2006/main";
+        XNamespace a = "http://schemas.openxmlformats.org/drawingml/2006/main";
+        XElement NamedShape(string name) => xml.Descendants(p + "sp")
+            .Single(s => (string?)s.Element(p + "nvSpPr")?.Element(p + "cNvPr")?.Attribute("name") == name);
+        var text = xml.Descendants(a + "t").Select(t => t.Value).ToArray();
+        Check(NamedShape("Navy masthead").Descendants(a + "srgbClr").Any(c => (string?)c.Attribute("val") == "10253C")
+            && NamedShape("Visual review legend marker").Descendants(a + "srgbClr").Any(c => (string?)c.Attribute("val") == "A51A77")
+            && text.Contains("2 VISUAL CANDIDATES") && text.Contains("REVIT  /  MARK") && text.Contains("ETABS  /  BEAM LABEL"),
+            "The generated review slide must include the reference-style masthead, legend, and both plan panels.");
+        long PlanWidth(string name) => (long)NamedShape(name).Descendants(a + "ext").Single().Attribute("cx")!;
+        var plottedTarget = ambiguous.Revit.Beams.Single(b => b.Reference == target.Reference);
+        Check(Math.Abs((double)PlanWidth(source.DisplayName) / PlanWidth(plottedTarget.DisplayName)
+            - (source.End.X - source.Start.X) / (target.End.X - target.Start.X)) < 1e-6,
+            "The framed plan panels must use the same scale.");
+        foreach (var pair in review.Pairs)
+            Check(text.Count(t => t == pair.Id) == 3,
+                "Each workbook review ID must appear beside both beams and in the slide footer.");
+        using var workbook = ZipFile.OpenRead(file);
+        using var queue = workbook.GetEntry("xl/worksheets/sheet3.xml")!.Open();
+        Check(XDocument.Load(queue).Descendants(X + "formula1").Single().Value == "\"Accept,Reject,Defer\"",
+            "Visual Review must emit the decision dropdown.");
+    }
+
+    internal static string WriteDecisionFixture(string workbook, RevitMappingResult? mapping = null)
+    {
+        if (mapping == null)
+        {
+            var source = Beam("E", 0, 1000, 150, 500) with { Level = "Story3" };
+            var a = Beam("R1", 0, 1400, 100) with { Level = "3rd Storey" };
+            var b = Beam("R2", 0, 1400, 200) with { Level = "3rd Storey" };
+            var c = Beam("R3", 10000, 11200) with { Level = "3rd Storey" };
+            mapping = Apply(new[] { source, Beam("auto", 10000, 11200, 70) with { Level = "Story3" } }, a, b, c);
+        }
+        return MappingReviewExport.Write(workbook, new DemandReport(Array.Empty<object?[]>(), 0, 0),
+            new SummaryTable(Array.Empty<object?[]>(), mapping));
     }
 
     private static void TestInputAndWorkbook(string directory, DemandReport report, SummaryTable summary)
@@ -293,14 +400,15 @@ internal static class RevitMappingTests
         string input = Path.Combine(directory, "revit-reader.xlsx");
         WriteFixture(input, "RC Beam Schedule", new[] { "ElementId", "Mark" }.Concat(RevitScheduleReader.CoordinateHeaders).ToArray(),
             new[] { ("987654", "RB-01", new[] { "0", "0", "0", "1000", "0", "0" }),
-                ("", "", new[] { "2000", "0", "0", "2000", "1200", "0" }),
+                ("987655", "", new[] { "2000", "0", "0", "2000", "1200", "0" }),
                 ("invalid", "RB-X", new[] { "NaN", "0", "0", "0", "0", "0" }),
-                ("zero", "RB-Z", new[] { "0", "0", "0", "0", "0", "0" }) });
+                ("zero", "RB-Z", new[] { "0", "0", "0", "0", "0", "0" }),
+                ("", "", new[] { "0", "0", "0", "1200", "0", "0" }) });
         byte[] source = File.ReadAllBytes(input);
         var imported = RevitScheduleReader.Read(input);
-        Check(imported.Beams.Count == 2 && imported.Skipped.Count == 2 && imported.Beams[0].Reference == "Element ID 987654"
-            && imported.Beams[0].Mark == "RB-01" && imported.Beams[1].Reference == "Excel row 5"
-            && imported.Skipped[0].Mark == "RB-X", "Reader must retain ID, Mark and physical row fallback and separately skip invalid rows.");
+        Check(imported.Beams.Count == 2 && imported.Skipped.Count == 3 && imported.Beams[0].StableId == "987654"
+            && imported.Beams[0].Mark == "RB-01" && imported.Skipped[2].Reason == "Missing stable beam ID"
+            && imported.Skipped[0].Mark == "RB-X", "Reader must retain ID and Mark and audit rows with missing IDs or invalid endpoints.");
         string bad = Path.Combine(directory, "revit-invalid.xlsx");
         foreach (var spec in new[] { ("wrong", RevitScheduleReader.CoordinateHeaders), ("RC Beam Schedule", RevitScheduleReader.CoordinateHeaders.Take(5).ToArray()) })
         {
@@ -383,8 +491,8 @@ internal static class RevitMappingTests
                 && SettingValue("End-extension / chain outer-end limit (mm)") == "1500",
                 "The written Excel workbook must report the selected settings.");
             var types = audit.Descendants(X + "row").Select(r => r.Elements(X + "c").FirstOrDefault()?.Value).ToArray();
-            Check(types.Count(t => t == "Pass total") == 6 && types.Count(t => t == "Segment link") == 1
-                && types.Count(t => t == "Skipped Revit") == 2 && types.Contains("Unmatched Revit"), "Audit must separate links, pass counts, unmatched and invalid rows.");
+            Check(types.Count(t => t == "Pass total") == 7 && types.Count(t => t == "Segment link") == 1
+                && types.Count(t => t == "Skipped Revit") == 3 && types.Contains("Unmatched Revit"), "Audit must separate links, pass counts, unmatched and invalid rows.");
             Check(audit.Descendants(X + "t").Any(t => t.Value == "RB-01") && appended.Descendants(X + "t").Any(t => t.Value.Contains("Mark: RB-01")),
                 "Summary and link audit must preserve Marks.");
             Check(appended.Descendants(X + "row").First().Descendants(X + "t").Select(t => t.Value)
@@ -443,7 +551,7 @@ internal static class RevitMappingTests
         var groupSummary = BeamScheduleSummary.WithRevitMapping(new(groupedRows),
             Data(Beam("R1", 0, 6000, 100), Beam("R2", 6000, 10000, 100),
                 sourceBeams[2] with { Reference = "R-ANCHOR" }, sourceBeams[3] with { Reference = "R-ANCHOR2" }));
-        Check(groupSummary.Mapping!.PassTotals[5].AddedLinks == 3 && groupSummary.Mapping.PassTotals[5].AddedGroups == 1
+        Check(groupSummary.Mapping!.PassTotals[6].AddedLinks == 3 && groupSummary.Mapping.PassTotals[6].AddedGroups == 1
             && groupSummary.Mapping.MappedEtabsCount == 4 && groupSummary.Mapping.MappedRevitCount == 4,
             "Summary integration must preserve many-to-many chain groups and count distinct model lines.");
         string groupFile = Path.Combine(directory, "grouped.xlsx");
@@ -455,12 +563,13 @@ internal static class RevitMappingTests
             string? Cell(XElement row, int column) => row.Elements(X + "c")
                 .SingleOrDefault(c => new string(((string)c.Attribute("r")!).TakeWhile(char.IsAsciiLetter).ToArray())
                     == DemandScheduleWriter.ColumnName(column))?.Value;
-            var chainRows = sheet.Descendants(X + "row").Where(r => Cell(r, 0) == "Segment link" && Cell(r, 6) == "6").ToArray();
+            var chainRows = sheet.Descendants(X + "row").Where(r => Cell(r, 0) == "Segment link"
+                && Cell(r, 6) == "Chain-to-chain review").ToArray();
             Check(chainRows.Length == 3 && chainRows.Select(r => Cell(r, 7)).Distinct().Count() == 1
                 && chainRows.Select(r => Cell(r, 3)).Distinct().Count() == 2
                 && chainRows.All(r => Cell(r, 8) == "REVIEW" && double.Parse(Cell(r, 16)!, CultureInfo.InvariantCulture) > 1),
                 "Chain link workbook rows must repeat references, use the same group ID and expose review/overlap measurements.");
-            var finalTotal = sheet.Descendants(X + "row").Single(r => Cell(r, 0) == "Pass total" && Cell(r, 6) == "6");
+            var finalTotal = sheet.Descendants(X + "row").Single(r => Cell(r, 0) == "Pass total" && Cell(r, 6) == "7");
             Check(Cell(finalTotal, 37) == "2" && Cell(finalTotal, 38) == "2" && Cell(finalTotal, 39) == "3"
                 && Math.Abs(double.Parse(Cell(finalTotal, 43)!, CultureInfo.InvariantCulture) - 50) < 1e-10,
                 "Excel must distinguish added beams from link rows and record coverage gain in percentage points.");

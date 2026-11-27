@@ -122,35 +122,40 @@ StartX_mm, StartY_mm, StartZ_mm, EndX_mm, EndY_mm, EndZ_mm
 
 Coordinates must be numeric, finite and in millimetres. Excel numeric cells,
 inline/shared strings and cached numeric formula values are supported; formulas
-without cached values are not evaluated. An optional **Element ID** column
+without cached values are not evaluated. An **Element ID** column
 (also `ElementId`, `Element_ID`, `Revit Element ID`, `RevitElementId`, or
-`Revit ID`) supplies the actual Revit reference. Missing IDs are explicitly
-identified as **Excel row N**, never as Element IDs. The audit always retains
+`Revit ID`) supplies the stable Revit reference. Rows with missing or duplicate
+IDs are skipped and audited. The audit retains
 the Excel row number. An optional **Mark** column supplies the Revit beam name;
 it is retained alongside the reference, not used as a unique identifier. Missing
-Marks remain blank or are explicitly shown as not provided. Invalid or coincident endpoints are skipped and listed
+Marks are reported and fall back to the ElementId in the review views. Invalid or coincident endpoints are skipped and listed
 separately, not counted as valid unmatched Revit beams. Unreadable workbooks or
 missing/duplicate required headers stop the export with an error so the selection
 can be corrected or cleared.
 
-The **Revit mapping settings** tab exposes the adjustable thresholds. The
-defaults are those in the table below; settings apply only when exporting Excel
-with a Revit workbook selected. Chain segment links must overlap by more than
-1 mm; this threshold is fixed rather than editable in the form.
-Coverage values are fractions, not percentages. Values must be finite and
-within their displayed meaning: coverage is greater than 0 and at most 1,
-distances are non-negative (endpoint tolerance must be positive), and the shared
-angle must be at least zero and less than 90 degrees. Extended overhang must be
-at least the join limit. Invalid settings stop the export with an explanation.
-The shared angle, lateral offset and span/group coverage apply to all relevant
-checks; ETABS segment containment and review-split vertical offset are separate.
+The **Revit mapping settings** tab exposes endpoint tolerance, angle, long-
+and short-span projection coverage, lateral and vertical offsets, and maximum
+end-extension. The other thresholds use the defaults in the table below.
+**Reset to defaults** restores all editable mapping thresholds without changing
+the selected workbook or other export settings. Mapping settings apply when exporting Excel
+with a Revit workbook selected or when running **Map two workbooks and export
+review**. The button prompts for the Revit workbook if none was selected under
+**Output and review**, then asks for the ETABS workbook and output filename.
+Coverage inputs are inclusive fractions from 0 to 1; the angle is
+0 to 90 degrees; distances are non-negative and the endpoint tolerance must be
+positive. All settings must be finite.
 The actual selected settings are recorded on the **Revit mapping** worksheet.
 The form starts with the current defaults each time; it does not persist or
 reload settings from an older export.
 
-Mapping uses the in-memory ETABS object endpoints already collected for the
-summary, after applying the selected beam scope and story filter. End offsets
-are not applied to mapping geometry. It estimates one global translation:
+Mapping uses the full live ETABS model, or the full ETABS `Beam summary` and
+Revit `RC Beam Schedule` for workbook-only review. The ETABS workbook supplies
+`Unique ID`, `Beam label`, `Story` and the six I/J coordinate columns in mm;
+Revit supplies `ElementId`, `Mark` and `Level`. Beam scope still controls the
+live schedule, and a selected story limits the review view only after matching.
+Linked ETABS lines use their matched Revit levels for display; unmatched lines
+use ETABS Story, including the `Story3` / `3rd Storey` convention.
+End offsets are not applied. The matcher estimates one global translation:
 
 ```text
 RevitXYZ = ETABSXYZ + (dX, dY, dZ)
@@ -172,7 +177,7 @@ alternatives are flagged for review. If no qualifying endpoint pair establishes
 a vector, the export explicitly reports **Translation not established - No match**,
 leaves the components blank and does not run later checks.
 
-### Six ordered checks
+### Seven ordered checks
 
 The matcher follows the ordered Grasshopper checks, not generic nearest-neighbor
 assignment.
@@ -188,15 +193,13 @@ The following are the default settings; edited values replace the relevant limit
 | 2 | Strict axis / split | At most 0.5 degrees and 10 mm 3D axis offset; at least 90% of each ETABS segment within the Revit span, 85% combined Revit coverage; 50 mm span, gap and projected overlap checks. |
 | 3 | Offset review | At most 0.5 degrees, 850 mm lateral and 750 mm vertical; at least 85% overlap of the longer span. All eligible candidates compete together; no projected end-difference limit. |
 | 4 | Split found (offset) | Multiple connected ETABS segments to one Revit beam; at most 0.5 degrees, 850 mm lateral and 100 mm vertical; 90% per-segment containment, 85% combined Revit coverage, 50 mm outer overhang and internal projected/3D joins. |
-| 5 | Split found (extended) | Pass 4 with up to 350 mm outer overhang; unchanged 50 mm internal joins and 85% combined Revit coverage. Only groups exceeding the earlier 50 mm outer allowance are added here. |
-| 6 | Chain-to-chain review | Unambiguous connected chains with at least two segments per side; 50 mm internal joins, 0.5 degrees, 850 mm lateral, 750 mm vertical, 85% longer-span overlap, and 1,500 mm projected outer-end differences at each end. Competing chain pairings are rejected. Only segment pairs with projected overlap **greater than 1 mm** emit links. |
+| 5 | End-extension review | Same angle and offsets as pass 3, but below 85% longer-span coverage and at least 85% shorter-span coverage. Each projected end difference must be at most 1,500 mm. Unresolved standard offsets still compete in the ranking. |
+| 6 | Split found (extended) | Pass 4 with up to 350 mm outer overhang; unchanged 50 mm internal joins and 85% combined Revit coverage. Only groups exceeding the earlier 50 mm outer allowance are added here. |
+| 7 | Chain-to-chain review | Unambiguous connected chains with at least two segments per side; 50 mm internal joins, 0.5 degrees, 850 mm lateral, 750 mm vertical, 85% longer-span overlap, and 1,500 mm projected outer-end differences at each end. Competing chain pairings are rejected. Only segment pairs with projected overlap **greater than 1 mm** emit links. |
 
 Split group coverage is the union of projected covered intervals divided by
 Revit length; overlaps are not counted twice. The 85% longer-span check is not
-applied independently to each split segment. The reference's legacy
-end-extension criteria use 85% coverage of both shorter and longer lines and
-1,500 mm at each end, but those candidates are already included in offset
-review and the legacy pass adds no assignments.
+applied independently to each split segment.
 
 Measurements follow the prototype: project the ETABS endpoints onto the Revit
 axis, then measure residual horizontal magnitude and absolute vertical offset.
@@ -204,16 +207,16 @@ Coverage uses actual line lengths, not a component-wise coordinate test.
 The chain check measures all constituent endpoints against the opposite span.
 Staggered internal split locations do not have to align.
 
-The unified 1:1 offset review requires mutual-nearest candidates ranked by
+Both 1:1 offset passes require mutual-nearest candidates ranked by
 maximum 3D endpoint-to-axis residual, with a **25 mm runner-up margin in both
 directions** (exactly 25 mm is accepted). Candidates at all eligible elevations
 compete together without a separate low-elevation priority.
 Competing strict-axis targets, split groups sharing a source segment, ambiguous
 chain neighbors and competing chain pairings are audited rather than forced.
-Passes 3-6 are visibly **review candidates**, not strict geometric matches.
+Every assigned link is **Matched**; later-pass provenance is recorded separately.
 
 With mapping enabled, **Beam summary** appends status, linked Revit references,
-group ID, review flag, Revit Marks, pass number and available endpoint error.
+group ID, review flag, Revit Marks, pass name and available endpoint error.
 Design, reinforcement and formula columns are neither moved nor changed.
 **Revit mapping** contains:
 
@@ -231,9 +234,26 @@ Design, reinforcement and formula columns are neither moved nor changed.
   skipped-invalid-row records. Ambiguity records are pass-specific history;
   a line can subsequently be resolved by a later permitted check.
 
+The companion PowerPoint automatically applies the review style: a navy level
+header, a color-coded legend, and framed Revit and ETABS panels with match counts.
+Each level has one zoomable slide with same-scale vector plans. Green lines are assigned, gray lines are
+unmatched, and magenta markers identify unresolved same-level end-extension
+alternatives. To enter the review queue, both beams must still be unmatched and
+pass the angle, lateral, vertical, and overlap checks. The projected end
+difference limits automatic assignment only; it is recorded with the reason
+in Excel. The slide footer lists review IDs, beam names, and longer-span
+overlap; Excel lists all candidates when a slide's footer runs out of room.
+
+Enter **Accept**, **Reject** or **Defer** in **Visual Review** along with the
+reviewer and notes. Blank means pending. Edit only those decision fields;
+do not copy decision cells to a different run. Excel recalculates **Effective
+Links** using the run and stable beam IDs. Filter `Active` to `Yes` for the
+usable set: it includes all automatic groups plus non-conflicting accepted
+overrides. Conflicting or stale decisions stay inactive and are reported.
+
 Totals count **distinct model lines separately**, not segment-link rows.
-**Full match** means all valid lines are linked (including review candidates)
-and none skipped; otherwise a non-empty alignment is **Partial alignment**.
+**Full match** means all valid lines are linked and none skipped; otherwise
+a non-empty alignment is **Partial alignment**.
 Neither label confirms structural identity. Review flags remain authoritative.
 An unmatched line can reflect segmentation or ambiguity, not just a distance
 exceeding the endpoint tolerance.
@@ -261,8 +281,15 @@ Optional offline verification against the full Grasshopper trial inputs:
 dotnet run --project .\tests\BeamScheduleTests.csproj -c Release -- --mapping-workbooks "C:\path\ETABS.xlsx" "C:\path\Revit.xlsx" "C:\path\verification-output"
 ```
 
-This test-only path reads the existing trial exports and writes a separate mapped
-workbook, CSV link audit and JSON report; the plugin itself always maps in-memory
-ETABS coordinates. It checks that the saved audit contains the calculated links,
-review flags and current settings, and that both source workbooks remain unchanged.
-Project workbooks are not committed.
+This path uses the same workbook mapping and paired export as the plugin and
+also writes `mapping-verification.json` for exact comparison. It checks that both
+source workbooks remain unchanged. Append `100` to test a 100 mm automatic
+end-extension / chain limit. Project workbooks are not committed.
+
+For Grasshopper parity, use [Compare-GrasshopperMapping.ps1](./tests/Compare-GrasshopperMapping.ps1)
+with `-GrasshopperSource` and `-PrepareHostDirectory` to compile the supplied
+reference methods. In Rhino 8 (.NET Core), load the resulting `Oracle.dll` from
+bytes and invoke its assembly entry point with a `string[]` containing the ETABS,
+Revit and reference JSON paths. Run the script again with `-ReferenceJson` and
+`-PluginVerificationJson` to verify translation, exact links, groups and unmatched
+sets.

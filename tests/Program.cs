@@ -4,6 +4,20 @@ using System.Xml.Linq;
 using BeamSchedulePlugin;
 using CSiAPIv1;
 
+if (args.Length is 4 or 5 && args[0] == "--mapping-workbooks")
+{
+    var options = RevitMappingOptions.Default;
+    if (args.Length == 5)
+        options = options with { EndLimit = double.Parse(args[4], System.Globalization.CultureInfo.InvariantCulture) };
+    WorkbookMappingVerification.Run(args[1], args[2], args[3], options);
+    return;
+}
+if (args.Length == 2 && args[0] == "--decision-fixture")
+{
+    RevitMappingTests.WriteDecisionFixture(args[1]);
+    return;
+}
+
 const string Draft = "DRAFT - ENGINEER REVIEW REQUIRED";
 var fractions = ZoneFractions.Create(.25, .5, .25);
 var model = DispatchProxy.Create<cSapModel, ModelProxy>();
@@ -204,9 +218,6 @@ finally
     Directory.Delete(directory);
 }
 Console.WriteLine("Beam summary and workbook tests passed.");
-
-if (args.Length == 4 && args[0] == "--mapping-workbooks")
-    WorkbookMappingVerification.Run(args[1], args[2], args[3]);
 
 if (args.Length == 2 && args[0] == "--fixture")
 {

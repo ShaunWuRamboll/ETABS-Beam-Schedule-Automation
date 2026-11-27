@@ -12,13 +12,16 @@ internal static class RevitMappingSheet
         "Revit StartX_mm", "Revit StartY_mm", "Revit StartZ_mm", "Revit EndX_mm", "Revit EndY_mm", "Revit EndZ_mm",
         "Added Revit beams", "Added ETABS lines", "Added links", "Added groups", "Running Revit beams", "Running ETABS lines",
         "Revit coverage gain (percentage points)", "ETABS coverage gain (percentage points)",
-        "Running Revit coverage (%)", "Running ETABS coverage (%)" };
+        "Running Revit coverage (%)", "Running ETABS coverage (%)", "ETABS Story", "Revit Level",
+        "Revit ElementId", "Pass number" };
 
     internal static List<object?[]> Rows(RevitMappingResult mapping)
     {
         var rows = new List<object?[]> { Headers };
         void Setting(string name, object? value) => rows.Add(new object?[] { "Setting", name, null, value });
         Setting("Revit source workbook", mapping.Revit.Filename);
+        Setting("ETABS source", mapping.EtabsFilename);
+        Setting("Mapping run ID", mapping.RunId);
         Setting("Alignment", mapping.Alignment);
         Setting("Translation direction", "RevitXYZ = ETABSXYZ + (dX, dY, dZ); no rotation or scaling");
         Setting("Translation vector from one-to-one endpoint matches (dX, dY, dZ) (mm)",
@@ -28,7 +31,7 @@ internal static class RevitMappingSheet
                 : $"{mapping.Pairs.Count} one-to-one endpoint match(es); selected by midpoint-offset voting and endpoint scoring");
         Setting("dX (mm)", mapping.Translation?.X); Setting("dY (mm)", mapping.Translation?.Y); Setting("dZ (mm)", mapping.Translation?.Z);
         Setting("Valid ETABS lines", mapping.Etabs.Count); Setting("Valid Revit beams", mapping.Revit.Beams.Count);
-        Setting("Mapped / review ETABS lines", mapping.MappedEtabsCount); Setting("Mapped / review Revit beams", mapping.MappedRevitCount);
+        Setting("Matched ETABS lines", mapping.MappedEtabsCount); Setting("Matched Revit beams", mapping.MappedRevitCount);
         Setting("Segment links (not distinct beams)", mapping.Links.Count);
         Setting("Unmatched ETABS lines", mapping.Etabs.Count - mapping.MappedEtabsCount);
         Setting("Unmatched Revit beams", mapping.Revit.Beams.Count - mapping.MappedRevitCount);
@@ -46,14 +49,14 @@ internal static class RevitMappingSheet
         Setting("Offset / chain vertical offset (mm)", options.ReviewVertical);
         Setting("Mutual-nearest runner-up margin in both directions (mm)", options.RunnerUpMargin);
         Setting("End-extension / chain outer-end limit (mm)", options.EndLimit);
-        Setting("Legacy end-extension shorter / longer coverage (subsumed by offset review)", options.SpanCoverage);
+        Setting("Minimum standard offset longer-span coverage", options.MinLongCoverage);
+        Setting("Minimum end-extension shorter-span coverage", options.MinShortCoverage);
         Setting("Extended split maximum outer overhang (mm)", options.SplitOverhang);
         Setting("Chain segment link overlap must exceed (mm)", options.ChainLinkOverlap);
         void Warning(string text) => rows.Add(new object?[] { "Review warning", null, null, text });
         Warning("Geometric matching does not verify beam design, structural identity, reinforcement, or model freshness.");
-        Warning("Passes 3-6 are review candidates, not strict matches. Assignments are locked after each pass; a shared group may contain multiple segment links.");
-        Warning("The reference's legacy end-extension pass is subsumed by offset review and creates no separate assignments.");
-        Warning("Full match means all valid lines are linked (including review candidates) and none skipped; not structural verification.");
+        Warning("Matched means assigned by geometry, not independently verified. The review flag preserves the assignment provenance.");
+        Warning("Assignments are locked after each pass; a shared split or chain group may contain multiple segment links.");
         Warning("Translation uses the top 24 midpoint voting bins and prototype greedy endpoint scoring; it is not exhaustive registration.");
         if (mapping.Translation == null) Warning("Translation not established. No mapping checks could run; correct the inputs or coordinate alignment.");
         if (mapping.HasCompetingTranslations) Warning("Competing translations found: every resulting link requires review.");
@@ -78,7 +81,7 @@ internal static class RevitMappingSheet
         {
             bool review = link.Review || mapping.HasCompetingTranslations || ambiguitySources.Contains(link.Etabs) || ambiguityTargets.Contains(link.Revit);
             rows.Add(BeamRow("Segment link", link.Etabs, link.Revit, link.Status, link.Pass, link.GroupId,
-                review ? "REVIEW" : "Strict geometric match", link.Reversed, link.Measurements));
+                review ? "REVIEW" : "Strict geometric match", link.Reversed, link.Measurements, link.PassName));
         }
         var usedSources = mapping.Links.Select(l => l.Etabs).ToHashSet();
         var usedTargets = mapping.Links.Select(l => l.Revit).ToHashSet();
@@ -88,21 +91,28 @@ internal static class RevitMappingSheet
             rows.Add(BeamRow("Unmatched Revit", null, beam, mapping.Translation == null ? "Translation not established" : "No accepted assignment"));
         foreach (var a in mapping.Ambiguities)
             rows.Add(BeamRow("Ambiguous candidate", a.Etabs, a.Revit, a.Reason, a.Pass, review: "REVIEW", metrics: a.Measurements));
+        foreach (var beam in mapping.Etabs.Where(b => b.EtabsLabel == null))
+            rows.Add(BeamRow("Missing ETABS label", beam, null, "Display falls back to Unique ID."));
+        foreach (var beam in mapping.Revit.Beams.Where(b => b.Mark == null))
+            rows.Add(BeamRow("Missing Revit Mark", null, beam, "Display falls back to ElementId."));
         foreach (var beam in mapping.SkippedEtabs) rows.Add(new object?[] { "Skipped ETABS", beam.Reference, beam.EtabsLabel, null, beam.ExcelRow, beam.Reason });
         foreach (var beam in mapping.Revit.Skipped) rows.Add(new object?[] { "Skipped Revit", null, null, beam.Reference, beam.ExcelRow, beam.Reason, null, null, "REVIEW", beam.Mark });
         return rows;
     }
 
     private static object?[] BeamRow(string kind, MappingBeam? etabs, MappingBeam? revit, string status,
-        int? pass = null, string? group = null, string? review = null, bool? reversed = null, MappingMeasurements? metrics = null)
+        int? pass = null, string? group = null, string? review = null, bool? reversed = null, MappingMeasurements? metrics = null,
+        string? passName = null)
     {
         var m = metrics ?? new();
-        object?[] values = { kind, etabs?.Reference, etabs?.EtabsLabel, revit?.Reference, revit?.ExcelRow, status, pass == null ? null : (double)pass.Value,
+        object?[] values = { kind, etabs?.Reference, etabs?.EtabsLabel, revit?.Reference, revit?.ExcelRow, status,
+            passName ?? (pass == null ? null : RevitMappingPasses.PassNames[pass.Value - 1]),
             group, review, revit?.Mark, reversed == null ? null : reversed.Value ? "Yes" : "No",
             m.EndpointError, m.Angle, m.AxisOffset, m.Lateral, m.Vertical, m.Overlap, m.LongerCoverage, m.ShorterCoverage,
             m.GroupCoverage, m.StartDifference, m.EndDifference, m.MaximumJoin, m.MaximumGap, m.MaximumOverlap,
             etabs?.Start.X, etabs?.Start.Y, etabs?.Start.Z, etabs?.End.X, etabs?.End.Y, etabs?.End.Z,
             revit?.Start.X, revit?.Start.Y, revit?.Start.Z, revit?.End.X, revit?.End.Y, revit?.End.Z };
-        return values;
+        return values.Concat(new object?[10]).Concat(new object?[] { etabs?.Level, revit?.Level, revit?.StableId,
+            pass == null ? null : (double)pass.Value }).ToArray();
     }
 }

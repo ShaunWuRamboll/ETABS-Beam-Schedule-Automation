@@ -102,21 +102,13 @@ internal static class BeamDemandExport
             if (orientation != eFrameDesignOrientation.Beam) continue;
             beams++;
 
-            string assigned = "", autoSelect = "", designed = "", pointI = "", pointJ = "";
+            string assigned = "", autoSelect = "", designed = "";
             var geometryIssues = new List<string>();
             int rc = model.FrameObj.GetSection(name, ref assigned, ref autoSelect);
             if (rc != 0) geometryIssues.Add($"Assigned section unavailable (ETABS code {rc})");
             rc = model.DesignConcrete.GetDesignSection(name, ref designed);
             if (rc != 0) geometryIssues.Add($"Design section unavailable (ETABS code {rc})");
-            rc = model.FrameObj.GetPoints(name, ref pointI, ref pointJ);
-            object?[] coordinates = new object?[6];
-            if (rc != 0)
-                geometryIssues.Add($"Endpoints unavailable (ETABS code {rc})");
-            else
-            {
-                ReadPoint(model, pointI, mm, coordinates, 0, geometryIssues);
-                ReadPoint(model, pointJ, mm, coordinates, 3, geometryIssues);
-            }
+            var coordinates = ReadEndpoints(model, name, mm, geometryIssues);
 
             if (!stations.TryGetValue(name, out var beamStations) || beamStations.Count == 0)
             {
@@ -144,6 +136,53 @@ internal static class BeamDemandExport
 
         if (beams == 0) throw new InvalidOperationException("The selected scope and level contain no beam-oriented frame objects.");
         return new DemandReport(result, beams, stationCount);
+    }
+
+    internal static RevitScheduleData ReadMappingGeometry(cSapModel model)
+    {
+        eForce force = default;
+        eLength length = default;
+        eTemperature temperature = default;
+        Check(model.GetPresentUnits_2(ref force, ref length, ref temperature), "read present units");
+        double mm = MillimetresPerUnit(length);
+        int count = 0;
+        string[] names = Array.Empty<string>(), labels = Array.Empty<string>(), stories = Array.Empty<string>();
+        Check(model.FrameObj.GetLabelNameList(ref count, ref names, ref labels, ref stories), "read beam labels");
+        RequireLengths(count, names, labels, stories);
+        var beams = new List<MappingBeam>();
+        var skipped = new List<SkippedMappingBeam>();
+        for (int i = 0; i < count; i++)
+        {
+            string name = names[i];
+            eFrameDesignOrientation orientation = default;
+            Check(model.FrameObj.GetDesignOrientation(name, ref orientation), $"read orientation for frame '{name}'");
+            if (orientation != eFrameDesignOrientation.Beam) continue;
+            var issues = new List<string>();
+            var xyz = ReadEndpoints(model, name, mm, issues);
+            string? label = string.IsNullOrWhiteSpace(labels[i]) ? null : labels[i].Trim();
+            if (xyz is [double x, double y, double z, double jx, double jy, double jz])
+            {
+                var beam = new MappingBeam(name, new(x, y, z), new(jx, jy, jz), EtabsLabel: label, Level: stories[i]);
+                if (beam.IsValid) { beams.Add(beam); continue; }
+            }
+            skipped.Add(new(name, null, issues.Count == 0 ? "Invalid or coincident ETABS endpoints" : string.Join("; ", issues),
+                EtabsLabel: label));
+        }
+        return new(model.GetModelFilename(true), beams, skipped);
+    }
+
+    private static object?[] ReadEndpoints(cSapModel model, string name, double mm, List<string> issues)
+    {
+        string pointI = "", pointJ = "";
+        var coordinates = new object?[6];
+        int rc = model.FrameObj.GetPoints(name, ref pointI, ref pointJ);
+        if (rc != 0) issues.Add($"Endpoints unavailable (ETABS code {rc})");
+        else
+        {
+            ReadPoint(model, pointI, mm, coordinates, 0, issues);
+            ReadPoint(model, pointJ, mm, coordinates, 3, issues);
+        }
+        return coordinates;
     }
 
     private static HashSet<string>? GetScope(cSapModel model, BeamScope scope, IReadOnlyList<string> groups)

@@ -17,7 +17,7 @@ internal sealed class BeamScheduleForm : Form
     private readonly TextBox cover, barDiameters, maxLayers, verticalSpacing;
     private readonly TextBox linkDiameters, linkLegs, minLinkSpacing, maxLinkSpacing, linkSpacingStep;
     private readonly TextBox revitWorkbook;
-    private readonly Dictionary<string, TextBox> mappingSettings = new();
+    private readonly Dictionary<string, (TextBox Input, string DefaultText)> mappingSettings = new();
 
     public BeamScheduleForm(cSapModel model)
     {
@@ -113,48 +113,45 @@ internal sealed class BeamScheduleForm : Form
         revitWorkbook = AddText(outputSection, "Revit beam schedule (.xlsx)", "");
         var mappingButtons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         var browseRevit = new Button { Text = "Browse...", AutoSize = true };
-        browseRevit.Click += (_, _) =>
-        {
-            using var picker = new OpenFileDialog
-            {
-                Title = "Select Revit beam schedule",
-                Filter = "Revit beam schedule (*.xlsx)|*.xlsx",
-                CheckFileExists = true,
-                Multiselect = false
-            };
-            if (picker.ShowDialog(this) == DialogResult.OK) revitWorkbook.Text = picker.FileName;
-        };
+        browseRevit.Click += (_, _) => BrowseRevitWorkbook();
         var clearRevit = new Button { Text = "Clear", AutoSize = true };
         clearRevit.Click += (_, _) => revitWorkbook.Clear();
         mappingButtons.Controls.Add(browseRevit);
         mappingButtons.Controls.Add(clearRevit);
         AddWideControl(outputSection, mappingButtons);
-        AddNote(outputSection, "Mapping follows six ordered geometric checks: endpoint, strict axis/split, "
-            + "offset review, review split, extended review split and chain-to-chain review. "
-            + "Review matches require engineering judgment. Revit Marks and group IDs are included.");
+        AddNote(outputSection, "Mapping follows seven ordered geometric checks, including end-extension review. "
+            + "Matched means assigned by geometry, not independently verified. Revit Marks and group IDs are included.");
 
         var mappingPage = CreatePage("Revit mapping settings", tabs);
         var mappingSection = CreateSection("Mapping thresholds");
         mappingPage.Controls.Add(mappingSection);
-        AddNote(mappingSection, "Optional Excel mapping only. Shared values apply to all relevant checks; coverage values are fractions (0 to 1). "
-            + "Endpoint tolerance is used to estimate the global translation.");
+        AddNote(mappingSection, "Optional Revit mapping adds a decision workbook and companion PowerPoint. "
+            + "Mapping uses the full model; a selected story limits only the review view. Coverage values are fractions (0 to 1).");
         var defaults = RevitMappingOptions.Default;
-        void MappingField(string name, string label, double value) =>
-            mappingSettings.Add(name, AddText(mappingSection, label, value.ToString("R", CultureInfo.InvariantCulture), singleLine: true));
-        MappingField(nameof(defaults.EndpointTolerance), "Endpoint / 3D axis tolerance (mm)", defaults.EndpointTolerance);
-        MappingField(nameof(defaults.Angle), "Shared strict / review angle (degrees)", defaults.Angle);
-        MappingField(nameof(defaults.JoinLimit), "Span / internal join limit (mm)", defaults.JoinLimit);
-        MappingField(nameof(defaults.SegmentCoverage), "Minimum ETABS segment containment", defaults.SegmentCoverage);
-        MappingField(nameof(defaults.SpanCoverage), "Minimum shared span / group coverage", defaults.SpanCoverage);
-        MappingField(nameof(defaults.ReviewLateral), "Shared review lateral offset (mm)", defaults.ReviewLateral);
-        MappingField(nameof(defaults.SplitVertical), "Review split vertical offset (mm)", defaults.SplitVertical);
-        MappingField(nameof(defaults.ReviewVertical), "Offset / chain vertical offset (mm)", defaults.ReviewVertical);
-        MappingField(nameof(defaults.RunnerUpMargin), "Runner-up margin (mm; both directions)", defaults.RunnerUpMargin);
-        MappingField(nameof(defaults.EndLimit), "End-extension / chain outer-end limit (mm)", defaults.EndLimit);
-        MappingField(nameof(defaults.SplitOverhang), "Extended split maximum outer overhang (mm; candidate filter)", defaults.SplitOverhang);
-        int labelWidth = mappingSettings.Values.Select(input =>
+        void MappingField(string name, string label, double value)
         {
-            var label = mappingSection.GetControlFromPosition(0, mappingSection.GetRow(input))!;
+            string defaultText = value.ToString("R", CultureInfo.InvariantCulture);
+            mappingSettings.Add(name, (AddText(mappingSection, label, defaultText, singleLine: true), defaultText));
+        }
+        MappingField(nameof(defaults.EndpointTolerance), "Endpoint / 3D axis tolerance (mm)", defaults.EndpointTolerance);
+        MappingField(nameof(defaults.Angle), "Angle / 3D axis direction (degrees)", defaults.Angle);
+        MappingField(nameof(defaults.MinLongCoverage), "Minimum long-span projection coverage", defaults.MinLongCoverage);
+        MappingField(nameof(defaults.MinShortCoverage), "Minimum short-span projection coverage", defaults.MinShortCoverage);
+        MappingField(nameof(defaults.ReviewLateral), "Maximum lateral offset (mm)", defaults.ReviewLateral);
+        MappingField(nameof(defaults.ReviewVertical), "Maximum vertical offset (mm)", defaults.ReviewVertical);
+        MappingField(nameof(defaults.EndLimit), "Maximum end-extension (mm)", defaults.EndLimit);
+        var resetMapping = new Button { Text = "Reset to defaults", AutoSize = true };
+        resetMapping.Click += (_, _) =>
+        {
+            foreach (var (input, defaultText) in mappingSettings.Values) input.Text = defaultText;
+        };
+        AddWideControl(mappingSection, resetMapping);
+        var workbookReview = new Button { Text = "Map two workbooks and export review", AutoSize = true };
+        workbookReview.Click += ExportWorkbookReview;
+        AddWideControl(mappingSection, workbookReview);
+        int labelWidth = mappingSettings.Values.Select(setting =>
+        {
+            var label = mappingSection.GetControlFromPosition(0, mappingSection.GetRow(setting.Input))!;
             return label.PreferredSize.Width + label.Margin.Horizontal;
         }).Max();
         mappingSection.ColumnStyles[0] = new ColumnStyle(SizeType.Absolute, labelWidth);
@@ -243,17 +240,22 @@ internal sealed class BeamScheduleForm : Form
             ReinforcementOptions? options = isWorkbook ? ReadReinforcementOptions() : null;
             var report = BeamDemandExport.Read(model, selection, groupNames, selectedStory);
             var summary = fractions == null ? null : BeamScheduleSummary.Create(model, report, fractions, options);
-            if (summary != null && revit != null) summary = BeamScheduleSummary.WithRevitMapping(summary, revit, mappingOptions);
-            DemandScheduleWriter.Write(dialog.FileName, report, summary);
+            if (summary != null && revit != null)
+                summary = BeamScheduleSummary.WithRevitMapping(summary, revit, mappingOptions, BeamDemandExport.ReadMappingGeometry(model));
+            string? deck = null;
+            if (summary?.Mapping != null)
+                deck = MappingReviewExport.Write(dialog.FileName, report, summary, overwriteWorkbook: true,
+                    levelFilter: selectedStory == null ? null : DisplayLevelFilter(summary.Mapping, selectedStory));
+            else DemandScheduleWriter.Write(dialog.FileName, report, summary);
             MessageBox.Show(this, $"Exported {report.BeamCount} beams and {report.StationCount} design stations."
                 + (summary?.Mapping is { } mapping ? $"\nRevit: {mapping.Alignment}; {mapping.Pairs.Count} pairs; "
-                    + $"{mapping.Links.Count} segment links across six passes."
-                    + $"\nCovered by strict matches or candidates: {mapping.MappedEtabsCount} ETABS / {mapping.MappedRevitCount} Revit beams; "
-                    + $"{mapping.Revit.Skipped.Count} invalid Revit rows skipped. See 'Revit mapping' for review warnings." : "")
+                    + $"{mapping.Links.Count} assigned segment links across seven passes."
+                    + $"\nMatched: {mapping.MappedEtabsCount} ETABS / {mapping.MappedRevitCount} Revit beams; "
+                    + $"{mapping.SkippedEtabs.Count + mapping.Revit.Skipped.Count} rows skipped."
+                    + $"\nReview deck: {deck}" : "")
                 + "\nThe schedule is a draft and requires engineering review.",
                 Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
-
         catch (Exception ex)
         {
             MessageBox.Show(this, $"Could not export the schedule:\n{ex.Message}",
@@ -265,28 +267,75 @@ internal sealed class BeamScheduleForm : Form
         }
     }
 
+    private static string DisplayLevelFilter(RevitMappingResult mapping, string story)
+    {
+        if (story.StartsWith("Story", StringComparison.OrdinalIgnoreCase))
+        {
+            var display = mapping.Revit.Beams.Select(b => b.Level).FirstOrDefault(level => MappingLevels.SameLevel(story, level));
+            if (display != null) return display;
+        }
+        return story;
+    }
+
+    private bool BrowseRevitWorkbook()
+    {
+        using var picker = new OpenFileDialog
+        {
+            Title = "Select Revit beam schedule",
+            Filter = "Revit beam schedule (*.xlsx)|*.xlsx",
+            CheckFileExists = true,
+            Multiselect = false
+        };
+        if (picker.ShowDialog(this) != DialogResult.OK) return false;
+        revitWorkbook.Text = picker.FileName;
+        return true;
+    }
+
+    private void ExportWorkbookReview(object? sender, EventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(revitWorkbook.Text) && !BrowseRevitWorkbook()) return;
+        using var source = new OpenFileDialog { Title = "Choose full-model ETABS Beam summary workbook", Filter = "Excel (*.xlsx)|*.xlsx" };
+        if (source.ShowDialog(this) != DialogResult.OK) return;
+        using var output = new SaveFileDialog { Title = "Save new mapping review workbook", Filter = "Excel (*.xlsx)|*.xlsx",
+            FileName = "Beam mapping review.xlsx", DefaultExt = "xlsx", AddExtension = true };
+        if (output.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            UseWaitCursor = true;
+            var mapping = MappingReviewExport.MapWorkbooks(source.FileName, revitWorkbook.Text.Trim(), ReadMappingOptions());
+            string deck = MappingReviewExport.Write(output.FileName, new DemandReport(Array.Empty<object?[]>(), 0, 0),
+                new SummaryTable(Array.Empty<object?[]>(), mapping));
+            MessageBox.Show(this, $"{mapping.Alignment}; {mapping.Links.Count} assigned links."
+                + $"\n{mapping.SkippedEtabs.Count + mapping.Revit.Skipped.Count} rows skipped."
+                + $"\nReview deck: {deck}\nSee 'Revit mapping' for the run audit.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Could not export mapping review:\n{ex.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally { UseWaitCursor = false; }
+    }
+
     private RevitMappingOptions ReadMappingOptions()
     {
         double Value(string name)
         {
-            string text = mappingSettings[name].Text.Trim();
+            string text = mappingSettings[name].Input.Text.Trim();
             if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value)
                 || double.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out value))
                 return value;
             throw new InvalidOperationException($"Invalid Revit mapping setting {name}: '{text}'.");
         }
-        var options = new RevitMappingOptions(
-            EndpointTolerance: Value(nameof(RevitMappingOptions.EndpointTolerance)),
-            Angle: Value(nameof(RevitMappingOptions.Angle)),
-            JoinLimit: Value(nameof(RevitMappingOptions.JoinLimit)),
-            SegmentCoverage: Value(nameof(RevitMappingOptions.SegmentCoverage)),
-            SpanCoverage: Value(nameof(RevitMappingOptions.SpanCoverage)),
-            ReviewLateral: Value(nameof(RevitMappingOptions.ReviewLateral)),
-            SplitVertical: Value(nameof(RevitMappingOptions.SplitVertical)),
-            ReviewVertical: Value(nameof(RevitMappingOptions.ReviewVertical)),
-            RunnerUpMargin: Value(nameof(RevitMappingOptions.RunnerUpMargin)),
-            EndLimit: Value(nameof(RevitMappingOptions.EndLimit)),
-            SplitOverhang: Value(nameof(RevitMappingOptions.SplitOverhang)));
+        var options = RevitMappingOptions.Default with
+        {
+            EndpointTolerance = Value(nameof(RevitMappingOptions.EndpointTolerance)),
+            Angle = Value(nameof(RevitMappingOptions.Angle)),
+            MinLongCoverage = Value(nameof(RevitMappingOptions.MinLongCoverage)),
+            MinShortCoverage = Value(nameof(RevitMappingOptions.MinShortCoverage)),
+            ReviewLateral = Value(nameof(RevitMappingOptions.ReviewLateral)),
+            ReviewVertical = Value(nameof(RevitMappingOptions.ReviewVertical)),
+            EndLimit = Value(nameof(RevitMappingOptions.EndLimit))
+        };
         options.Validate();
         return options;
     }

@@ -17,6 +17,10 @@
     <Compile Include="..\RevitMappingPasses.cs" Link="RevitMappingPasses.cs" />
     <Compile Include="..\RevitMappingSheet.cs" Link="RevitMappingSheet.cs" />
     <Compile Include="..\RevitMappingOptions.cs" Link="RevitMappingOptions.cs" />
+    <Compile Include="..\MappingLevels.cs" Link="MappingLevels.cs" />
+    <Compile Include="..\MappingReview.cs" Link="MappingReview.cs" />
+    <Compile Include="..\MappingReviewDeck.cs" Link="MappingReviewDeck.cs" />
+    <Compile Include="..\MappingReviewExport.cs" Link="MappingReviewExport.cs" />
     <Reference Include="CSiAPIv1">
       <HintPath>$(EtabsApiPath)</HintPath>
     </Reference>
